@@ -1,6 +1,26 @@
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
 use bytemuck::{Pod, Zeroable};
+
+use crate::{
+    containers::{BucketLookup, IndexLookup, Table, TableMut, TableRef, TableSliceRef},
+    data::{
+        FileData, FileDescriptor, FileEntity, FileGroup, FileInfo, FilePackage, FilePackageChild,
+        FilePath, IntoHash, StreamData, StreamEntity, StreamFolder, StreamPath,
+    },
+};
+
+fn read_pod<R: Read, T: Pod>(reader: &mut R) -> T {
+    let mut uninit = T::zeroed();
+    assert_eq!(
+        reader
+            .read(bytemuck::cast_slice_mut(std::slice::from_mut(&mut uninit)))
+            .unwrap(),
+        std::mem::size_of::<T>()
+    );
+
+    uninit
+}
 
 fn ru32<R: Read>(reader: &mut R) -> u32 {
     let mut bytes = [0; std::mem::size_of::<u32>()];
@@ -141,6 +161,9 @@ impl ArchiveMetadata {
     }
 }
 
+const REGION_COUNT: usize = 5;
+const LOCALE_COUNT: usize = 14;
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct ResourceTableHeader {
@@ -178,17 +201,212 @@ pub struct ResourceTableHeader {
 
     // NOTE: This is hardcoded to be 14, but in reality it should be locale_count long
     // This assumed value for locale_count is asserted on during initialization
-    locale_hash_to_region: [[u32; 3]; 14],
+    locale_hash_to_region: [[u32; 3]; LOCALE_COUNT],
 
-    stream_folder_count: u32,
-    stream_path_count: u32,
-    stream_desc_count: u32,
-    stream_data_count: u32,
+    pub stream_folder_count: u32,
+    pub stream_path_count: u32,
+    pub stream_entity_count: u32,
+    pub stream_data_count: u32,
 }
 
 impl ResourceTableHeader {
     pub fn read<R: Read>(reader: &mut R) -> Self {
-        let bytes = read_exact_size(reader, std::mem::size_of::<Self>());
-        *bytemuck::from_bytes(&bytes)
+        let this: Self = read_pod(reader);
+        assert_eq!(this.region_count as usize, REGION_COUNT);
+        assert_eq!(this.locale_count as usize, LOCALE_COUNT);
+        this
+    }
+}
+
+pub struct ResourceTables {
+    raw: Box<[u8]>,
+    stream_folder: Table<StreamFolder>,
+    stream_path_lookup: IndexLookup,
+    stream_path: Table<StreamPath>,
+    stream_entity: Table<StreamEntity>,
+    stream_data: Table<StreamData>,
+    file_path_lookup: BucketLookup,
+    file_path: Table<FilePath>,
+    file_entity: Table<FileEntity>,
+    file_package_lookup: IndexLookup,
+    file_package: Table<FilePackage>,
+    file_group: Table<FileGroup>,
+    file_package_child: Table<FilePackageChild>,
+    file_info: Table<FileInfo>,
+    file_desc: Table<FileDescriptor>,
+    file_data: Table<FileData>,
+}
+
+impl ResourceTables {
+    #[allow(unused_assignments)]
+    pub fn from_bytes(mut bytes: Box<[u8]>) -> Self {
+        use std::mem::size_of as s;
+        let mut cursor = 0usize;
+        let header: ResourceTableHeader =
+            *bytemuck::from_bytes(&bytes[cursor..cursor + s::<ResourceTableHeader>()]);
+
+        cursor += s::<ResourceTableHeader>();
+
+        macro_rules! fetch {
+            ($t:path, $count:expr) => {
+                unsafe {
+                    let table = <$t>::new(&mut bytes[cursor..], ($count) as usize);
+                    cursor += table.fixed_byte_len();
+                    table
+                }
+            };
+        }
+
+        let stream_folder = fetch!(Table<StreamFolder>, header.stream_folder_count);
+        let stream_path_lookup = fetch!(IndexLookup, header.stream_path_count);
+        let stream_path = fetch!(Table<StreamPath>, header.stream_path_count);
+        let stream_entity = fetch!(Table<StreamEntity>, header.stream_entity_count);
+        let stream_data = fetch!(Table<StreamData>, header.stream_data_count);
+
+        let file_path_lookup_count: u32 = *bytemuck::from_bytes(&bytes[cursor..cursor + 4]);
+        let file_path_bucket_count: u32 = *bytemuck::from_bytes(&bytes[cursor + 4..cursor + 8]);
+
+        cursor += 8;
+
+        let file_path_lookup = unsafe {
+            let lookup = BucketLookup::new(
+                &mut bytes[cursor..],
+                file_path_lookup_count as usize,
+                file_path_bucket_count as usize,
+            );
+            cursor += lookup.fixed_byte_len();
+            lookup
+        };
+
+        let file_path = fetch!(Table<FilePath>, header.file_path_count);
+        let file_entity = fetch!(Table<FileEntity>, header.file_entity_count);
+        let file_package_lookup = fetch!(IndexLookup, header.file_package_count);
+        let file_package = fetch!(Table<FilePackage>, header.file_package_count);
+        let file_group = fetch!(
+            Table<FileGroup>,
+            header.file_info_group_count
+                + header.file_data_group_count
+                + header.versioned_file_group_count
+        );
+        let file_package_child = fetch!(Table<FilePackageChild>, header.file_package_child_count);
+        let file_info = fetch!(
+            Table<FileInfo>,
+            header.file_package_info_count
+                + header.file_group_info_count
+                + header.versioned_file_desc_count
+        );
+        let file_desc = fetch!(
+            Table<FileDescriptor>,
+            header.file_package_desc_count
+                + header.file_group_info_count
+                + header.versioned_file_desc_count
+        );
+        let file_data = fetch!(
+            Table<FileData>,
+            header.file_package_data_count
+                + header.file_group_info_count
+                + header.versioned_file_data_count
+        );
+
+        Self {
+            raw: bytes,
+            stream_folder,
+            stream_path_lookup,
+            stream_path,
+            stream_entity,
+            stream_data,
+            file_path_lookup,
+            file_path,
+            file_entity,
+            file_package_lookup,
+            file_package,
+            file_group,
+            file_package_child,
+            file_info,
+            file_desc,
+            file_data,
+        }
+    }
+}
+
+pub struct Archive {
+    metadata: ArchiveMetadata,
+    resource: ResourceTables,
+}
+
+macro_rules! decl_lookup {
+    ($($name:ident => $t:ty),*) => {
+        paste::paste! {
+            $(
+                pub fn [<lookup_ $name>](&self, path: impl IntoHash) -> Option<TableRef<'_, $t>> {
+                    let index = self.resource.[<$name _lookup>].get(path.into_hash())?;
+                    TableRef::new(self, &self.resource.$name, index)
+                }
+
+                pub fn [<lookup_ $name _mut>](&mut self, path: impl IntoHash) -> Option<TableMut<'_, $t>> {
+                    let index = self.resource.[<$name _lookup>].get(path.into_hash())?;
+                    TableMut::new(self, |archive| &mut archive.resource.$name, index)
+                }
+            )*
+        }
+    }
+}
+
+macro_rules! decl_access {
+    ($($name:ident => $t:ty),*) => {
+        paste::paste! {
+            $(
+                pub fn [<num_ $name>](&self) -> usize {
+                    self.resource.$name.len()
+                }
+
+                pub fn [<get_ $name>](&self, index: u32) -> Option<TableRef<'_, $t>> {
+                    TableRef::new(self, &self.resource.$name, index)
+                }
+
+                pub fn [<get_ $name _mut>](&mut self, index: u32) -> Option<TableMut<'_, $t>> {
+                    TableMut::new(self, |archive| &mut archive.resource.$name, index)
+                }
+
+                pub fn [<get_ $name _slice>](&self, index: u32, count: u32) -> Option<TableSliceRef<'_, $t>> {
+                    TableSliceRef::new(self, &self.resource.$name, index, count)
+                }
+            )*
+        }
+    }
+}
+
+impl Archive {
+    decl_lookup! {
+        file_path => FilePath,
+        stream_path => StreamPath,
+        file_package => FilePackage
+    }
+
+    decl_access! {
+        file_path => FilePath,
+        file_entity => FileEntity,
+        file_info => FileInfo,
+        file_desc => FileDescriptor,
+        file_data => FileData,
+        file_package => FilePackage,
+        file_package_child => FilePackageChild,
+        file_group => FileGroup,
+        stream_folder => StreamFolder,
+        stream_path => StreamPath,
+        stream_entity => StreamEntity,
+        stream_data => StreamData
+    }
+
+    pub fn read<R: Read + Seek>(reader: &mut R) -> Self {
+        let metadata = ArchiveMetadata::read(reader);
+
+        reader
+            .seek(SeekFrom::Start(metadata.resource_table_offset))
+            .unwrap();
+
+        let decompressed = read_compressed_section(reader);
+        let resource = ResourceTables::from_bytes(decompressed.into_boxed_slice());
+        Self { metadata, resource }
     }
 }

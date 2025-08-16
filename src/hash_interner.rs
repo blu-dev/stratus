@@ -1,6 +1,6 @@
 use std::{
     alloc::Layout,
-    fmt::{Display, Write},
+    fmt::{Debug, Display, Write},
     num::NonZeroUsize,
     ops::Range,
 };
@@ -488,6 +488,12 @@ pub struct DisplayHash<'a> {
     pub hash: Hash40,
 }
 
+impl Debug for DisplayHash<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(self, f)
+    }
+}
+
 impl Display for DisplayHash<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write_hash(self.hash, self.slab, f)
@@ -531,12 +537,18 @@ pub fn write_hash(
     let bucket_idx = hash.crc32() as usize % HASH_BUCKET_COUNT;
     let len = unsafe { (*slab.bucket_lengths)[bucket_idx] };
     let start_idx = bucket_idx * HASH_BUCKET_SIZE;
-    let bucket = unsafe { &(&(*slab.hashes))[start_idx..start_idx + len as usize] };
+    let bucket = unsafe { &(&*slab.hashes)[start_idx..start_idx + len as usize] };
 
     let shifted_hash = (hash.raw() >> 8) as u32;
 
     match bucket.binary_search_by(|a| a.shifted_hash.cmp(&shifted_hash)) {
         Ok(idx) => write_hash_by_index(start_idx + idx, slab, f),
-        Err(_) => f.write_str("<unknown>"),
+        Err(_) => {
+            if f.alternate() {
+                f.write_str("<unknown>")
+            } else {
+                write!(f, "{:#x}", hash.raw())
+            }
+        }
     }
 }

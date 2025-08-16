@@ -1,20 +1,19 @@
-use std::{
-    fs::File,
-    io::{Cursor, Seek, SeekFrom},
-    ops::Deref,
-    sync::OnceLock,
-    time::Instant,
-};
+use std::{cell::OnceCell, fs::File, ops::Deref, sync::OnceLock, time::Instant};
 
 use camino::Utf8Path;
 use smash_hash::Hash40;
 
-use crate::hash_interner::{DisplayHash, HashMemorySlab, InternerCache};
+use crate::{
+    archive::Archive,
+    hash_interner::{DisplayHash, HashMemorySlab, InternerCache},
+};
 
 mod archive;
+mod containers;
+mod data;
 mod hash_interner;
 
-const STRATUS_FOLDER: &'static str = "sd://ultimate/stratus/";
+const STRATUS_FOLDER: &'static str = "sd:/ultimate/stratus/";
 
 fn init_folder() {
     let path = Utf8Path::new(STRATUS_FOLDER);
@@ -69,9 +68,9 @@ fn init_hashes() {
             Missing,
         }
 
-        let blob_path: &'static Utf8Path = Utf8Path::new("sd://ultimate/stratus/hashes.blob");
-        let meta_path: &'static Utf8Path = Utf8Path::new("sd://ultimate/stratus/hashes.meta");
-        let hashes_src: &'static Utf8Path = Utf8Path::new("sd://ultimate/stratus/Hashes_FullPath");
+        let blob_path: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/hashes.blob");
+        let meta_path: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/hashes.meta");
+        let hashes_src: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/Hashes_FullPath");
 
         let now = Instant::now();
         let load_method: LoadMethod;
@@ -88,6 +87,13 @@ fn init_hashes() {
             if let Ok(file) = std::fs::read_to_string(hashes_src) {
                 let mut cache = InternerCache::default();
                 for line in file.lines() {
+                    let path = Utf8Path::new(line);
+                    if let Some(extension) = path.extension() {
+                        slab.intern_path(&mut cache, Utf8Path::new(extension));
+                    }
+                    if let Some(file_name) = path.file_name() {
+                        slab.intern_path(&mut cache, Utf8Path::new(file_name));
+                    }
                     slab.intern_path(&mut cache, Utf8Path::new(line));
                 }
 
@@ -118,24 +124,38 @@ fn init_hashes() {
     });
 }
 
+struct ReadOnlyArchive(Archive);
+
+impl Deref for ReadOnlyArchive {
+    type Target = Archive;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+unsafe impl Send for ReadOnlyArchive {}
+unsafe impl Sync for ReadOnlyArchive {}
+
+static ARCHIVE: OnceLock<ReadOnlyArchive> = OnceLock::new();
+
+#[skyline::hook(offset = 0x3542a74, inline)]
+fn print_info(ctx: &skyline::hooks::InlineCtx) {
+    let index = ctx.registers[8].w();
+    let info = ARCHIVE.get().unwrap().get_file_info(index).unwrap();
+    let path = info.file_path();
+    println!("{}", path.path_and_entity.hash40().display());
+}
+
 #[skyline::main(name = "stratus")]
 pub fn main() {
     init_folder();
     init_hashes();
 
-    let mut file = File::open("rom:/data.arc").unwrap();
-    let archive = archive::ArchiveMetadata::read(&mut file);
-    file.seek(SeekFrom::Start(archive.resource_table_offset))
-        .unwrap();
-    let decompressed_bytes = archive::read_compressed_section(&mut file);
-    let table = archive::ResourceTableHeader::read(&mut Cursor::new(decompressed_bytes));
-    drop(file);
+    ARCHIVE.get_or_init(|| {
+        let mut file = File::open("rom:/data.arc").unwrap();
+        ReadOnlyArchive(archive::Archive::read(&mut file))
+    });
 
-    println!("{archive:x?}");
-    println!("{table:x?}");
-
-    println!(
-        "{}",
-        Hash40::const_new("fighter/mario/model/body/c00/model.numdlb").display()
-    );
+    skyline::install_hook!(print_info);
 }
