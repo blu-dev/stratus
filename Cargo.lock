@@ -3,5 +3,105 @@
 version = 4
 
 [[package]]
+name = "bytemuck"
+version = "1.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3995eaeebcdf32f91f980d360f78732ddc061097ab4e39991ae7a6ace9194677"
+
+[[package]]
+name = "camino"
+version = "1.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d07aa9a93b00c76f71bc35d598bed923f6d4f3a9ca5c24b7737ae1a292841c0"
+
+[[package]]
+name = "lazy_static"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+
+[[package]]
+name = "libc-nnsdk"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ece4a9a361bf75974e2c18b719e8fd501e4e336d7a5db22d077c4f2367a94be9"
+
+[[package]]
+name = "nnsdk"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03213d51eb95956e62d59f902de5ad7cf48e1310340b8544e5f9536e48f08fd9"
+dependencies = [
+ "libc-nnsdk",
+]
+
+[[package]]
+name = "proc-macro2"
+version = "1.0.97"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d61789d7719defeb74ea5fe81f2fdfdbd28a803847077cecce2ff14e1472f6f1"
+dependencies = [
+ "unicode-ident",
+]
+
+[[package]]
+name = "quote"
+version = "1.0.40"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1885c039570dc00dcb4ff087a89e185fd56bae234ddc7f056a945bf36467248d"
+dependencies = [
+ "proc-macro2",
+]
+
+[[package]]
+name = "skyline"
+version = "0.5.1"
+source = "git+https://github.com/ultimate-research/skyline-rs#7bd379b25c926cb65a492412805258e49ce9136e"
+dependencies = [
+ "libc-nnsdk",
+ "nnsdk",
+ "skyline_macro",
+]
+
+[[package]]
+name = "skyline_macro"
+version = "0.2.1"
+source = "git+https://github.com/ultimate-research/skyline-rs#7bd379b25c926cb65a492412805258e49ce9136e"
+dependencies = [
+ "lazy_static",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "smash-hash"
+version = "0.1.0"
+source = "git+https://github.com/blu-dev/smash-hash#5883107b8e3a2ee99ee210d3ef6b036b08cc7961"
+
+[[package]]
 name = "stratus-mod-loader"
 version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "camino",
+ "skyline",
+ "smash-hash",
+]
+
+[[package]]
+name = "syn"
+version = "1.0.109"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "unicode-ident"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a5f39404a5da50712a4c1eecf25e90dd62b613502b7e925fd4e4d19b5c96512"

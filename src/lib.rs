@@ -1,14 +1,101 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use std::{ops::Deref, sync::OnceLock};
+
+use camino::Utf8Path;
+use smash_hash::Hash40;
+
+use crate::hash_interner::{DisplayHash, HashMemorySlab, InternerCache};
+
+mod hash_interner;
+
+const STRATUS_FOLDER: &'static str = "sd://ultimate/stratus/";
+
+fn init_folder() {
+    let path = Utf8Path::new(STRATUS_FOLDER);
+    if path.exists() {
+        if path.is_file() {
+            panic!("stratus folder is a file and not a folder");
+        }
+        return;
+    }
+
+    let _ = std::fs::create_dir_all(STRATUS_FOLDER);
+
+    assert!(
+        path.exists(),
+        "stratus folder does not exist after attempting to create it"
+    );
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+struct ReadOnlyHashMemorySlab(HashMemorySlab);
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+impl Deref for ReadOnlyHashMemorySlab {
+    type Target = HashMemorySlab;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
+}
+
+unsafe impl Send for ReadOnlyHashMemorySlab {}
+unsafe impl Sync for ReadOnlyHashMemorySlab {}
+
+static HASHES: OnceLock<ReadOnlyHashMemorySlab> = OnceLock::new();
+
+trait HashDisplay {
+    fn display(self) -> DisplayHash<'static>;
+}
+
+impl HashDisplay for smash_hash::Hash40 {
+    fn display(self) -> DisplayHash<'static> {
+        DisplayHash {
+            slab: HASHES.get().expect("HashMemorySlab not initialized"),
+            hash: self,
+        }
+    }
+}
+
+fn init_hashes() {
+    let _ = HASHES.get_or_init(|| {
+        let blob_path: &'static Utf8Path = Utf8Path::new("sd://ultimate/stratus/hashes.blob");
+        let meta_path: &'static Utf8Path = Utf8Path::new("sd://ultimate/stratus/hashes.meta");
+        let hashes_src: &'static Utf8Path = Utf8Path::new("sd://ultimate/stratus/Hashes_FullPath");
+
+        let slab = if blob_path.exists() && meta_path.exists() {
+            let blob = std::fs::read(blob_path).unwrap();
+            let meta = std::fs::read(meta_path).unwrap();
+
+            HashMemorySlab::from_blob(blob.into_boxed_slice(), meta.into_boxed_slice())
+        } else {
+            let mut slab = HashMemorySlab::new();
+
+            if let Ok(file) = std::fs::read_to_string(hashes_src) {
+                let mut cache = InternerCache::default();
+                for line in file.lines() {
+                    slab.intern_path(&mut cache, Utf8Path::new(line));
+                }
+
+                slab.finalize(cache);
+
+                let blob = slab.dump_blob();
+                let meta = slab.dump_meta();
+                std::fs::write(blob_path, blob).unwrap();
+                std::fs::write(meta_path, meta).unwrap();
+            }
+
+            slab
+        };
+
+        ReadOnlyHashMemorySlab(slab)
+    });
+}
+
+#[skyline::main(name = "stratus")]
+pub fn main() {
+    init_folder();
+    init_hashes();
+
+    println!(
+        "{}",
+        Hash40::const_new("fighter/mario/model/body/c00/model.numdlb").display()
+    );
 }
