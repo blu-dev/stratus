@@ -1,10 +1,17 @@
-use std::{ops::Deref, sync::OnceLock, time::Instant};
+use std::{
+    fs::File,
+    io::{Cursor, Seek, SeekFrom},
+    ops::Deref,
+    sync::OnceLock,
+    time::Instant,
+};
 
 use camino::Utf8Path;
 use smash_hash::Hash40;
 
 use crate::hash_interner::{DisplayHash, HashMemorySlab, InternerCache};
 
+mod archive;
 mod hash_interner;
 
 const STRATUS_FOLDER: &'static str = "sd://ultimate/stratus/";
@@ -115,6 +122,17 @@ fn init_hashes() {
 pub fn main() {
     init_folder();
     init_hashes();
+
+    let mut file = File::open("rom:/data.arc").unwrap();
+    let archive = archive::ArchiveMetadata::read(&mut file);
+    file.seek(SeekFrom::Start(archive.resource_table_offset))
+        .unwrap();
+    let decompressed_bytes = archive::read_compressed_section(&mut file);
+    let table = archive::ResourceTableHeader::read(&mut Cursor::new(decompressed_bytes));
+    drop(file);
+
+    println!("{archive:x?}");
+    println!("{table:x?}");
 
     println!(
         "{}",
