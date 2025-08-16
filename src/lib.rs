@@ -1,10 +1,21 @@
-use std::{cell::OnceCell, fs::File, ops::Deref, sync::OnceLock, time::Instant};
+use std::{
+    cell::OnceCell,
+    fs::File,
+    ops::Deref,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        OnceLock,
+    },
+    time::Instant,
+};
 
 use camino::Utf8Path;
+use skyline::hooks::InlineCtx;
 use smash_hash::Hash40;
 
 use crate::{
     archive::Archive,
+    data::IntoHash,
     hash_interner::{DisplayHash, HashMemorySlab, InternerCache},
 };
 
@@ -147,15 +158,113 @@ fn print_info(ctx: &skyline::hooks::InlineCtx) {
     println!("{}", path.path_and_entity.hash40().display());
 }
 
+#[skyline::from_offset(0x392cc60)]
+fn jemalloc(size: u64, align: u64) -> *mut u8;
+
+static DID_LOAD: AtomicBool = AtomicBool::new(false);
+
+#[skyline::hook(offset = 0x35442e8, inline)]
+fn jemalloc_hook(ctx: &mut InlineCtx) {
+    let res_service = ctx.registers[19].x() as *const u8;
+    let current_index = ctx.registers[27].w();
+    let absolute_index = unsafe { *res_service.add(0x230).cast::<u32>() } + current_index;
+    let ptr: *mut u8;
+    if ARCHIVE
+        .get()
+        .unwrap()
+        .get_file_info(absolute_index)
+        .unwrap()
+        .file_path()
+        .path_and_entity
+        .hash40()
+        == "ui/layout/menu/main_menu/main_menu/layout.arc".into_hash()
+    {
+        println!("Replacing main menu");
+        ptr = std::fs::read(
+            "sd:/ultimate/mods/hdr-assets/ui/layout/menu/main_menu/main_menu/layout.arc",
+        )
+        .unwrap()
+        .leak()
+        .as_mut_ptr();
+        DID_LOAD.store(true, Ordering::SeqCst);
+        ctx.registers[28].set_x(0x0);
+    } else {
+        ptr = unsafe { jemalloc(ctx.registers[0].x(), ctx.registers[1].x()) };
+    }
+
+    ctx.registers[0].set_x(ptr as u64);
+}
+
+#[skyline::hook(offset = 0x3544338, inline)]
+fn skip_load_hook(ctx: &mut InlineCtx) {
+    if DID_LOAD.swap(false, Ordering::SeqCst) {
+        ctx.registers[3].set_x(2);
+        println!("Did load");
+    } else if ctx.registers[23].x() <= ctx.registers[8].x() {
+        ctx.registers[3].set_x(1);
+    } else {
+        ctx.registers[3].set_x(0);
+    }
+}
+
+#[skyline::hook(offset = 0x3544758, inline)]
+fn skip_load_hook_p2(ctx: &mut InlineCtx) {
+    let x = ctx.registers[3].x();
+    ctx.registers[3].set_x(x - 1);
+    if x - 1 == 0 {
+        let mem_size = unsafe {
+            *(ctx as *mut InlineCtx as *const u8)
+                .add(0x100 + 0x28)
+                .cast::<usize>()
+        };
+        ctx.registers[2].set_x(mem_size as u64);
+    }
+}
+
+fn patch_res_threads() {
+    use skyline::patching::Patch;
+
+    Patch::in_text(0x35442e8).nop().unwrap(); // Nops jemalloc_hook
+    Patch::in_text(0x3544338).data(0xB5002103u32).unwrap();
+    Patch::in_text(0x3544758).data(0xB5001583u32).unwrap();
+
+    Patch::in_text(0x3750c2c).nop().unwrap();
+}
+
+#[skyline::hook(offset = 0x3750c2c, inline)]
+fn skip_load_arc_table(ctx: &mut InlineCtx) {
+    ctx.registers[0].set_x(ARCHIVE.get().unwrap().data_ptr() as u64);
+}
+
 #[skyline::main(name = "stratus")]
 pub fn main() {
     init_folder();
     init_hashes();
-
+    patch_res_threads();
     ARCHIVE.get_or_init(|| {
         let mut file = File::open("rom:/data.arc").unwrap();
-        ReadOnlyArchive(archive::Archive::read(&mut file))
+        let mut archive = archive::Archive::read(&mut file);
+        archive
+            .lookup_file_path_mut("ui/layout/menu/main_menu/main_menu/layout.arc")
+            .unwrap()
+            .entity_mut()
+            .info_mut()
+            .desc_mut()
+            .data_mut()
+            .patch(
+                std::fs::metadata(
+                    "sd:/ultimate/mods/hdr-assets/ui/layout/menu/main_menu/main_menu/layout.arc",
+                )
+                .unwrap()
+                .len() as u32,
+            );
+        ReadOnlyArchive(archive)
     });
 
-    skyline::install_hook!(print_info);
+    skyline::install_hooks!(
+        skip_load_arc_table,
+        jemalloc_hook,
+        skip_load_hook,
+        skip_load_hook_p2
+    );
 }

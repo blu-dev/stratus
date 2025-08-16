@@ -4,7 +4,10 @@ use bytemuck::{Pod, Zeroable};
 use camino::{Utf8Path, Utf8PathBuf};
 use smash_hash::Hash40;
 
-use crate::{containers::TableRef, HashDisplay};
+use crate::{
+    containers::{TableMut, TableRef},
+    HashDisplay,
+};
 
 pub trait IntoHash {
     fn into_hash(self) -> Hash40;
@@ -185,6 +188,15 @@ pub struct FileData {
     flags: FileFlags,
 }
 
+impl TableMut<'_, FileData> {
+    pub fn patch(&mut self, new_size: u32) {
+        if !self.flags.contains(FileFlags::IS_COMPRESSED) {
+            self.compressed_size = new_size;
+        }
+        self.decompressed_size = new_size;
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum FileLoadMethod {
     // Index is for FileEntity
@@ -244,6 +256,14 @@ pub struct FileDescriptor {
     load_method: u32,
 }
 
+impl TableMut<'_, FileDescriptor> {
+    pub fn data_mut(&mut self) -> TableMut<'_, FileData> {
+        println!("{self:x?}");
+        let index = self.file_data;
+        self.archive_mut().get_file_data_mut(index).unwrap()
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
 pub struct FileInfo {
@@ -259,11 +279,27 @@ impl TableRef<'_, FileInfo> {
     }
 }
 
+impl TableMut<'_, FileInfo> {
+    pub fn desc_mut(&mut self) -> TableMut<'_, FileDescriptor> {
+        println!("{self:?} => {:?}", self.archive().get_file_path(self.path));
+        let index = self.desc;
+        self.archive_mut().get_file_desc_mut(index).unwrap()
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
 pub struct FileEntity {
     package_or_group: u32,
     info: u32,
+}
+
+impl TableMut<'_, FileEntity> {
+    pub fn info_mut(&mut self) -> TableMut<'_, FileInfo> {
+        println!("{self:?}");
+        let index = self.info;
+        self.archive_mut().get_file_info_mut(index).unwrap()
+    }
 }
 
 #[repr(C)]
@@ -273,6 +309,14 @@ pub struct FilePath {
     ext_and_version: HashWithData,
     parent: Hash,
     file_name: Hash,
+}
+
+impl TableMut<'_, FilePath> {
+    pub fn entity_mut(&mut self) -> TableMut<'_, FileEntity> {
+        println!("{self:?}");
+        let index = self.path_and_entity.data();
+        self.archive_mut().get_file_entity_mut(index).unwrap()
+    }
 }
 
 struct FixTrailingSlashWithData<'a>(&'a HashWithData);

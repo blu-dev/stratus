@@ -156,7 +156,7 @@ impl ArchiveMetadata {
         let bytes = read_exact_size(reader, std::mem::size_of::<Self>());
 
         let this: &Self = bytemuck::from_bytes(&bytes);
-        assert_eq!(this.magic, Self::MAGIC);
+        assert_eq!(this.magic, Self::MAGIC, "{:#x}", this.magic);
         *this
     }
 }
@@ -293,7 +293,7 @@ impl ResourceTables {
             Table<FileInfo>,
             header.file_package_info_count
                 + header.file_group_info_count
-                + header.versioned_file_desc_count
+                + header.versioned_file_info_count
         );
         let file_desc = fetch!(
             Table<FileDescriptor>,
@@ -408,5 +408,9 @@ impl Archive {
         let decompressed = read_compressed_section(reader);
         let resource = ResourceTables::from_bytes(decompressed.into_boxed_slice());
         Self { metadata, resource }
+    }
+
+    pub fn data_ptr(&self) -> *const u8 {
+        self.resource.raw.as_ptr()
     }
 }
