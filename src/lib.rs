@@ -1,4 +1,4 @@
-use std::{ops::Deref, sync::OnceLock};
+use std::{ops::Deref, sync::OnceLock, time::Instant};
 
 use camino::Utf8Path;
 use smash_hash::Hash40;
@@ -56,13 +56,23 @@ impl HashDisplay for smash_hash::Hash40 {
 
 fn init_hashes() {
     let _ = HASHES.get_or_init(|| {
+        enum LoadMethod {
+            Blob,
+            HashFile,
+            Missing,
+        }
+
         let blob_path: &'static Utf8Path = Utf8Path::new("sd://ultimate/stratus/hashes.blob");
         let meta_path: &'static Utf8Path = Utf8Path::new("sd://ultimate/stratus/hashes.meta");
         let hashes_src: &'static Utf8Path = Utf8Path::new("sd://ultimate/stratus/Hashes_FullPath");
 
+        let now = Instant::now();
+        let load_method: LoadMethod;
+
         let slab = if blob_path.exists() && meta_path.exists() {
             let blob = std::fs::read(blob_path).unwrap();
             let meta = std::fs::read(meta_path).unwrap();
+            load_method = LoadMethod::Blob;
 
             HashMemorySlab::from_blob(blob.into_boxed_slice(), meta.into_boxed_slice())
         } else {
@@ -80,10 +90,22 @@ fn init_hashes() {
                 let meta = slab.dump_meta();
                 std::fs::write(blob_path, blob).unwrap();
                 std::fs::write(meta_path, meta).unwrap();
+                load_method = LoadMethod::HashFile;
+            } else {
+                load_method = LoadMethod::Missing;
             }
 
             slab
         };
+
+        let elapsed = now.elapsed().as_secs_f32();
+        match load_method {
+            LoadMethod::Blob => println!("[stratus::hashes] Loaded hash blob in {elapsed:.3}s"),
+            LoadMethod::HashFile => {
+                println!("[stratus::hashes] Generated hash blob in {elapsed:.3}s")
+            }
+            LoadMethod::Missing => println!("[stratus::hashes] No hash blob generated"),
+        }
 
         ReadOnlyHashMemorySlab(slab)
     });
