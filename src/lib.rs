@@ -1,5 +1,4 @@
 use std::{
-    cell::OnceCell,
     fs::File,
     ops::Deref,
     sync::{
@@ -11,7 +10,6 @@ use std::{
 
 use camino::Utf8Path;
 use skyline::hooks::InlineCtx;
-use smash_hash::Hash40;
 
 use crate::{
     archive::Archive,
@@ -212,11 +210,7 @@ fn skip_load_hook_p2(ctx: &mut InlineCtx) {
     let x = ctx.registers[3].x();
     ctx.registers[3].set_x(x - 1);
     if x - 1 == 0 {
-        let mem_size = unsafe {
-            *(ctx as *mut InlineCtx as *const u8)
-                .add(0x300 + 0x28)
-                .cast::<usize>()
-        };
+        let mem_size = unsafe { *(ctx.sp.x() as *const u8).add(0x28).cast::<usize>() };
         ctx.registers[2].set_x(mem_size as u64);
     }
 }
@@ -246,13 +240,14 @@ extern "C" {
 
 #[skyline::main(name = "stratus")]
 pub fn main() {
-    unsafe {
-        set_overclock_enabled(true);
-        set_cpu_boost_mode(1);
-    }
+    init_folder();
     init_hashes();
     patch_res_threads();
     ARCHIVE.get_or_init(|| {
+        unsafe {
+            set_overclock_enabled(true);
+            set_cpu_boost_mode(1);
+        }
         let mut file = File::open("rom:/data.arc").unwrap();
         let mut archive = archive::Archive::read(&mut file);
         archive
@@ -269,6 +264,10 @@ pub fn main() {
                 .unwrap()
                 .len() as u32,
             );
+        unsafe {
+            set_overclock_enabled(false);
+            set_cpu_boost_mode(0);
+        }
         ReadOnlyArchive(archive)
     });
 
