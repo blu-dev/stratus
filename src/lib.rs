@@ -214,7 +214,7 @@ fn skip_load_hook_p2(ctx: &mut InlineCtx) {
     if x - 1 == 0 {
         let mem_size = unsafe {
             *(ctx as *mut InlineCtx as *const u8)
-                .add(0x100 + 0x28)
+                .add(0x300 + 0x28)
                 .cast::<usize>()
         };
         ctx.registers[2].set_x(mem_size as u64);
@@ -236,9 +236,20 @@ fn skip_load_arc_table(ctx: &mut InlineCtx) {
     ctx.registers[0].set_x(ARCHIVE.get().unwrap().data_ptr() as u64);
 }
 
+extern "C" {
+    #[link_name = "_ZN2nn2oe22SetCpuOverclockEnabledEb"]
+    fn set_overclock_enabled(enable: bool);
+
+    #[link_name = "_ZN2nn2oe15SetCpuBoostModeENS0_12CpuBoostModeE"]
+    fn set_cpu_boost_mode(val: i32);
+}
+
 #[skyline::main(name = "stratus")]
 pub fn main() {
-    init_folder();
+    unsafe {
+        set_overclock_enabled(true);
+        set_cpu_boost_mode(1);
+    }
     init_hashes();
     patch_res_threads();
     ARCHIVE.get_or_init(|| {
