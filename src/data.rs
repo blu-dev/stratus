@@ -5,7 +5,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use smash_hash::Hash40;
 
 use crate::{
-    containers::{TableMut, TableRef},
+    containers::{TableMut, TableRef, TableSliceRef},
     HashDisplay,
 };
 
@@ -188,13 +188,30 @@ pub struct FileData {
     flags: FileFlags,
 }
 
-impl TableMut<'_, FileData> {
+impl FileData {
+    pub fn new_for_unsharing(size: u32, offset: u32) -> Self {
+        Self {
+            in_group_offset: offset,
+            compressed_size: 0,
+            decompressed_size: size,
+            flags: FileFlags::empty(),
+        }
+    }
+
+    pub fn group_offset(&self) -> u32 {
+        self.in_group_offset
+    }
+
     pub fn is_compressed(&self) -> bool {
         self.flags.contains(FileFlags::IS_COMPRESSED)
     }
 
     pub fn compressed_size(&self) -> u32 {
         self.compressed_size
+    }
+
+    pub fn set_compressed_size(&mut self, new_size: u32) {
+        self.compressed_size = new_size;
     }
 
     pub fn patch(&mut self, new_size: u32) {
@@ -206,7 +223,7 @@ impl TableMut<'_, FileData> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum FileLoadMethod {
+pub enum FileLoadMethod {
     // Index is for FileEntity
     Unowned(u32),
 
@@ -223,6 +240,16 @@ enum FileLoadMethod {
 
     // Index is locale or region (depending on file)
     UnsupportedRegionLocale(u32),
+}
+
+impl FileLoadMethod {
+    pub fn is_owned(&self) -> bool {
+        matches!(self, Self::Owned(_))
+    }
+
+    pub fn is_skip(&self) -> bool {
+        matches!(self, Self::PackageSkip(_))
+    }
 }
 
 impl From<u32> for FileLoadMethod {
@@ -264,6 +291,38 @@ pub struct FileDescriptor {
     load_method: u32,
 }
 
+impl FileDescriptor {
+    pub fn new(group: u32, file_data: u32, load_method: FileLoadMethod) -> Self {
+        Self {
+            group,
+            file_data,
+            load_method: load_method.into(),
+        }
+    }
+
+    pub fn set_data(&mut self, data: u32) {
+        self.file_data = data;
+    }
+
+    pub fn load_method(&self) -> FileLoadMethod {
+        FileLoadMethod::from(self.load_method)
+    }
+
+    pub fn set_load_method(&mut self, method: FileLoadMethod) {
+        self.load_method = method.into();
+    }
+
+    pub fn set_group(&mut self, group: u32) {
+        self.group = group;
+    }
+}
+
+impl<'a> TableRef<'a, FileDescriptor> {
+    pub fn data(&self) -> TableRef<'a, FileData> {
+        self.archive().get_file_data(self.file_data).unwrap()
+    }
+}
+
 impl<'a> TableMut<'a, FileDescriptor> {
     pub fn data_mut(self) -> TableMut<'a, FileData> {
         let index = self.file_data;
@@ -280,6 +339,16 @@ pub struct FileInfo {
     flags: FileInfoFlags,
 }
 
+impl FileInfo {
+    pub fn flags(&self) -> FileInfoFlags {
+        self.flags
+    }
+
+    pub fn set_flags(&mut self, flags: FileInfoFlags) {
+        self.flags = flags;
+    }
+}
+
 impl<'a> TableRef<'a, FileInfo> {
     pub fn file_path(&self) -> TableRef<'a, FilePath> {
         self.archive().get_file_path(self.path).unwrap()
@@ -288,11 +357,25 @@ impl<'a> TableRef<'a, FileInfo> {
     pub fn entity(&self) -> TableRef<'a, FileEntity> {
         self.archive().get_file_entity(self.entity).unwrap()
     }
+
+    pub fn desc(&self) -> TableRef<'a, FileDescriptor> {
+        self.archive().get_file_desc(self.desc).unwrap()
+    }
 }
 
 impl<'a> TableMut<'a, FileInfo> {
     pub fn path_ref(&self) -> TableRef<'_, FilePath> {
         self.archive().get_file_path(self.path).unwrap()
+    }
+
+    pub fn path_mut(&mut self) -> TableMut<'_, FilePath> {
+        let index = self.path;
+        self.archive_mut().get_file_path_mut(index).unwrap()
+    }
+
+    pub fn path(self) -> TableMut<'a, FilePath> {
+        let index = self.path;
+        self.into_archive_mut().get_file_path_mut(index).unwrap()
     }
 
     pub fn entity_ref(&self) -> TableRef<'_, FileEntity> {
@@ -302,6 +385,18 @@ impl<'a> TableMut<'a, FileInfo> {
     pub fn entity_mut(self) -> TableMut<'a, FileEntity> {
         let index = self.entity;
         self.into_archive_mut().get_file_entity_mut(index).unwrap()
+    }
+
+    pub fn set_entity(&mut self, entity: u32) {
+        self.entity = entity;
+    }
+
+    pub fn set_desc(&mut self, desc: u32) {
+        self.desc = desc;
+    }
+
+    pub fn desc_ref(&self) -> TableRef<'_, FileDescriptor> {
+        self.archive().get_file_desc(self.desc).unwrap()
     }
 
     pub fn desc_mut(self) -> TableMut<'a, FileDescriptor> {
@@ -316,6 +411,15 @@ impl<'a> TableMut<'a, FileInfo> {
 pub struct FileEntity {
     package_or_group: u32,
     info: u32,
+}
+
+impl FileEntity {
+    pub fn new(package_or_group: u32, info: u32) -> Self {
+        Self {
+            package_or_group,
+            info,
+        }
+    }
 }
 
 impl<'a> TableRef<'a, FileEntity> {
@@ -340,7 +444,19 @@ pub struct FilePath {
     file_name: Hash,
 }
 
+impl<'a> TableRef<'a, FilePath> {
+    pub fn entity(&self) -> TableRef<'a, FileEntity> {
+        self.archive()
+            .get_file_entity(self.path_and_entity.data())
+            .unwrap()
+    }
+}
+
 impl<'a> TableMut<'a, FilePath> {
+    pub fn set_entity(&mut self, entity: u32) {
+        self.path_and_entity.set_data(entity);
+    }
+
     pub fn entity_mut(self) -> TableMut<'a, FileEntity> {
         let index = self.path_and_entity.data();
         self.into_archive_mut().get_file_entity_mut(index).unwrap()
@@ -366,7 +482,10 @@ impl Debug for FixTrailingSlash<'_> {
 impl Debug for FilePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FilePath")
-            .field("path_and_entity", &self.path_and_entity)
+            .field(
+                "path_and_entity",
+                &FixTrailingSlashWithData(&self.path_and_entity),
+            )
             .field("ext_and_version", &self.ext_and_version)
             .field("parent", &FixTrailingSlash(&self.parent))
             .field("file_name", &self.file_name)
@@ -386,6 +505,20 @@ pub struct FilePackage {
     child_start: u32,
     child_count: u32,
     flags: FilePackageFlags,
+}
+
+impl<'a> TableRef<'a, FilePackage> {
+    pub fn data_group(&self) -> TableRef<'a, FileGroup> {
+        self.archive()
+            .get_file_group(self.path_and_group.data())
+            .unwrap()
+    }
+
+    pub fn infos(&self) -> TableSliceRef<'a, FileInfo> {
+        self.archive()
+            .get_file_info_slice(self.info_start, self.info_count)
+            .unwrap()
+    }
 }
 
 #[repr(transparent)]

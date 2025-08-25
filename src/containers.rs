@@ -38,6 +38,25 @@ impl<T: Pod> Table<T> {
         }
     }
 
+    /// Writes this table into the provided buffer at the provided offset, then updates this buffer
+    /// to point to the provided buffer. The provided buffer must have a lifetime >= this structure
+    pub unsafe fn write_and_update(&mut self, buffer: &mut [u8], offset: usize) {
+        buffer[offset..offset + self.fixed_byte_len()]
+            .copy_from_slice(unsafe { bytemuck::cast_slice(&*self.fixed) });
+        buffer[offset + self.fixed_byte_len()..offset + self.byte_len()]
+            .copy_from_slice(bytemuck::cast_slice(&self.dynamic));
+        self.fixed = bytemuck::cast_slice_mut(&mut buffer[offset..offset + self.byte_len()]);
+        self.dynamic.clear();
+    }
+
+    pub fn byte_len(&self) -> usize {
+        self.fixed_byte_len() + self.dynamic_byte_len()
+    }
+
+    pub fn dynamic_byte_len(&self) -> usize {
+        self.dynamic.len() * std::mem::size_of::<T>()
+    }
+
     /// Returns the length of the fixed array, in bytes
     pub fn fixed_byte_len(&self) -> usize {
         // SAFETY: Caller guarantees in constructor that there are no other mutable references
@@ -344,7 +363,7 @@ impl<'a, T> TableSliceRef<'a, T> {
         start: u32,
         count: u32,
     ) -> Option<Self> {
-        if !table.contains(start + count - 1) {
+        if count != 0 && !table.contains(start + count - 1) {
             return None;
         }
 
@@ -369,6 +388,14 @@ impl<'a, T> TableSliceRef<'a, T> {
             archive: self.archive,
             table: self.table,
             index,
+        })
+    }
+
+    pub fn get_local(&self, index: u32) -> Option<TableRef<'_, T>> {
+        (index < self.count).then_some(TableRef {
+            archive: self.archive,
+            table: self.table,
+            index: self.start + index,
         })
     }
 
@@ -451,6 +478,35 @@ impl IndexLookup {
             fixed: slice,
             dynamic: BTreeMap::new(),
         }
+    }
+
+    pub unsafe fn write_and_update(&mut self, buffer: &mut [u8], offset: usize) {
+        buffer[offset..offset + self.fixed_byte_len()]
+            .copy_from_slice(unsafe { bytemuck::cast_slice(&*self.fixed) });
+
+        // resorting the buffer is not-so-cheap operation, so we should only do it if we have to
+        if !self.dynamic.is_empty() {
+            let mut current_offset = offset + self.fixed_byte_len();
+            for (hash, index) in self.dynamic.iter() {
+                buffer[current_offset..current_offset + std::mem::size_of::<HashWithData>()]
+                    .copy_from_slice(bytemuck::bytes_of(&HashWithData::new(*hash, *index)));
+                current_offset += std::mem::size_of::<HashWithData>();
+            }
+            bytemuck::cast_slice_mut::<_, HashWithData>(
+                &mut buffer[offset..offset + self.byte_len()],
+            )
+            .sort_unstable_by_key(|hash| hash.hash40());
+        }
+        self.fixed = bytemuck::cast_slice_mut(&mut buffer[offset..offset + self.byte_len()]);
+        self.dynamic.clear();
+    }
+
+    pub fn byte_len(&self) -> usize {
+        self.fixed_byte_len() + self.dynamic_byte_len()
+    }
+
+    pub fn dynamic_byte_len(&self) -> usize {
+        self.dynamic.len() * std::mem::size_of::<HashWithData>()
     }
 
     /// Returns the length of the fixed-size section, in bytes
@@ -622,6 +678,79 @@ impl BucketLookup {
             fixed_buckets: bucket_slice,
             dynamic: buckets.into_boxed_slice(),
         }
+    }
+
+    pub unsafe fn write_and_update(&mut self, buffer: &mut [u8], offset: usize) {
+        let full_count = (*self.fixed_buckets)
+            .iter()
+            .map(|bucket| bucket.count as u32)
+            .sum::<u32>()
+            + self
+                .dynamic
+                .iter()
+                .map(|dynamic| dynamic.len() as u32)
+                .sum::<u32>();
+        buffer[offset..offset + 4].copy_from_slice(bytemuck::bytes_of(&full_count));
+        buffer[offset + 4..offset + 8]
+            .copy_from_slice(bytemuck::bytes_of(&(self.dynamic.len() as u32)));
+
+        let offset = offset + 8;
+
+        let bucket_size = self.dynamic.len() * std::mem::size_of::<Bucket>();
+        let bucket_slice: *mut [Bucket] =
+            bytemuck::cast_slice_mut(&mut buffer[offset..offset + bucket_size]);
+
+        let hash_slice = bytemuck::cast_slice_mut::<_, HashWithData>(
+            &mut buffer[offset + bucket_size
+                ..offset + bucket_size + full_count as usize * std::mem::size_of::<HashWithData>()],
+        );
+
+        let mut hash_start = 0;
+
+        for bucket_idx in 0..self.dynamic.len() {
+            let old_bucket = unsafe { (&*self.fixed_buckets)[bucket_idx] };
+            let dynamic_bucket = &self.dynamic[bucket_idx];
+            let new_bucket = Bucket {
+                start: hash_start,
+                count: old_bucket.count + dynamic_bucket.len() as u32,
+            };
+
+            unsafe {
+                (*bucket_slice)[bucket_idx] = new_bucket;
+            }
+
+            hash_slice[hash_start as usize..(hash_start + old_bucket.count) as usize]
+                .copy_from_slice(unsafe {
+                    &(&*self.fixed_hashes)
+                        [old_bucket.start as usize..(old_bucket.start + old_bucket.count) as usize]
+                });
+
+            if !dynamic_bucket.is_empty() {
+                for (idx, (hash, data)) in dynamic_bucket.iter().enumerate() {
+                    hash_slice[(hash_start + old_bucket.count) as usize + idx] =
+                        HashWithData::new(*hash, *data);
+                }
+
+                hash_slice[hash_start as usize..(hash_start + new_bucket.count) as usize]
+                    .sort_unstable_by_key(|hash| hash.hash40());
+            }
+
+            hash_start += new_bucket.count;
+        }
+
+        self.fixed_buckets = bucket_slice;
+        self.fixed_hashes = hash_slice;
+        self.dynamic.iter_mut().for_each(|bucket| bucket.clear());
+    }
+
+    pub fn byte_len(&self) -> usize {
+        // Add extra 8 bytes for bucket count
+        self.fixed_byte_len() + self.dynamic_byte_len() + 8
+    }
+
+    pub fn dynamic_byte_len(&self) -> usize {
+        self.dynamic.iter().map(|map| map.len()).sum::<usize>()
+            * std::mem::size_of::<HashWithData>()
     }
 
     /// Returns the size of the fixed-length section, in bytes

@@ -1,6 +1,10 @@
-use std::io::{Read, Seek, SeekFrom};
+use std::{
+    alloc::Layout,
+    io::{Read, Seek, SeekFrom},
+};
 
 use bytemuck::{Pod, Zeroable};
+use camino::Utf8Path;
 
 use crate::{
     containers::{BucketLookup, IndexLookup, Table, TableMut, TableRef, TableSliceRef},
@@ -165,7 +169,7 @@ const REGION_COUNT: usize = 5;
 const LOCALE_COUNT: usize = 14;
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable, PartialEq, Eq)]
 pub struct ResourceTableHeader {
     resource_data_size: u32,
     file_path_count: u32,
@@ -220,6 +224,7 @@ impl ResourceTableHeader {
 
 pub struct ResourceTables {
     raw: Box<[u8]>,
+    header: ResourceTableHeader,
     stream_folder: Table<StreamFolder>,
     stream_path_lookup: IndexLookup,
     stream_path: Table<StreamPath>,
@@ -238,6 +243,50 @@ pub struct ResourceTables {
 }
 
 impl ResourceTables {
+    // reserializes the tables into a new boxed slice, releasing the old one
+    // this will update all tables to point to the new memory range in the new byte slice
+    pub fn reserialize_internal(&mut self) {
+        macro_rules! reserialize_order {
+            ($($id:ident,)*) => {
+                let mut total = std::mem::size_of::<ResourceTableHeader>();
+                $(
+                    let $id = {
+                        let current = total;
+                        println!(concat!(stringify!($id), "[{:#x} - {:#x}]"), current, current + self.$id.byte_len());
+                        total += self.$id.byte_len();
+                        current
+                    };
+                )*
+
+                let new_buffer = unsafe {
+                    std::alloc::alloc(Layout::from_size_align(total, 0x10).unwrap())
+                };
+
+                let buffer_slice = unsafe { std::slice::from_raw_parts_mut(new_buffer, total) };
+
+                $(
+                    unsafe { self.$id.write_and_update(buffer_slice, $id); }
+                )*
+
+                self.header.resource_data_size = total as u32;
+                self.header.file_entity_count = self.file_entity.len() as u32;
+                self.header.file_package_desc_count = self.file_desc.len() as u32 - self.header.versioned_file_desc_count - self.header.file_group_info_count;
+                self.header.file_package_data_count = self.file_data.len()  as u32 - self.header.versioned_file_data_count - self.header.file_group_info_count;
+                unsafe { *new_buffer.cast::<ResourceTableHeader>() = self.header; }
+
+                self.raw = unsafe { Box::from_raw(buffer_slice) };
+            }
+        }
+
+        reserialize_order! {
+            stream_folder, stream_path_lookup, stream_path,
+            stream_entity, stream_data, file_path_lookup,
+            file_path, file_entity, file_package_lookup,
+            file_package, file_group, file_package_child,
+            file_info, file_desc, file_data,
+        }
+    }
+
     #[allow(unused_assignments)]
     pub fn from_bytes(mut bytes: Box<[u8]>) -> Self {
         use std::mem::size_of as s;
@@ -308,8 +357,11 @@ impl ResourceTables {
                 + header.versioned_file_data_count
         );
 
+        println!("{:x} vs {:x}", cursor, header.resource_data_size);
+
         Self {
             raw: bytes,
+            header,
             stream_folder,
             stream_path_lookup,
             stream_path,
@@ -371,6 +423,10 @@ macro_rules! decl_access {
                 pub fn [<get_ $name _slice>](&self, index: u32, count: u32) -> Option<TableSliceRef<'_, $t>> {
                     TableSliceRef::new(self, &self.resource.$name, index, count)
                 }
+
+                pub fn [<push_ $name>](&mut self, element: $t) -> u32 {
+                    self.resource.$name.push(element)
+                }
             )*
         }
     }
@@ -396,6 +452,14 @@ impl Archive {
         stream_path => StreamPath,
         stream_entity => StreamEntity,
         stream_data => StreamData
+    }
+
+    pub fn dump(&self, path: impl AsRef<Utf8Path>) {
+        std::fs::write(path.as_ref(), &self.resource.raw).unwrap();
+    }
+
+    pub fn reserialize(&mut self) {
+        self.resource.reserialize_internal();
     }
 
     pub fn read<R: Read + Seek>(reader: &mut R) -> Self {

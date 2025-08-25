@@ -12,11 +12,11 @@ use std::{
 
 use camino::Utf8Path;
 use skyline::hooks::InlineCtx;
-use smash_hash::Hash40;
+use smash_hash::{Hash40, Hash40Map};
 
 use crate::{
     archive::Archive,
-    data::IntoHash,
+    data::{FileData, FileDescriptor, FileEntity, FileInfoFlags, FileLoadMethod, IntoHash},
     discover::FileSystem,
     hash_interner::{DisplayHash, HashMemorySlab, InternerCache},
 };
@@ -283,10 +283,31 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
         .map(|info| info.file_path().path_and_entity.hash40());
 
     if let Some(path) = path {
+        if true {
+            let offset_into_read = unsafe { *res_service.add(0x220).cast::<u64>() };
+            let mut x20 = ctx.registers[20].x();
+            let mut x21 = ctx.registers[21].x();
+            let mut x25 = ctx.registers[25].x();
+            let target_offset_into_read = x20 + x21;
+            println!(
+                "Attempting to load {} with cursor {:#x} | {:#x} | {:#x} | {:#x} ({} / {})",
+                path.display(),
+                offset_into_read,
+                target_offset_into_read,
+                ctx.registers[25].x(),
+                unsafe { *res_service.add(0x234).cast::<u32>() },
+                current_index,
+                unsafe { *res_service.add(0x22C).cast::<u32>() }
+            );
+        }
+
         // SAFETY: This path is only going to be called from the ResInflateThread, so this being a "static" variable is effectively a TLS variable
         if let Some(size) =
             ReadOnlyFileSystem::file_system().get_full_file_path(path, unsafe { &mut BUFFER })
         {
+            // SAFETY: See above
+            println!("Replacing {}", unsafe { &BUFFER });
+
             // We need to create the same alignment on our buffer the game is expecting.
             // This alignment is going to be 0x1000 (page alignment) for graphics archives (BNTX and NUTEXB)
             let alignment = ctx.registers[0].x();
@@ -440,9 +461,6 @@ extern "C" {
 
     #[link_name = "_ZN2nn2oe15SetCpuBoostModeENS0_12CpuBoostModeE"]
     fn set_cpu_boost_mode(val: i32);
-
-    // #[link_name = "_ZN2nn2oe27SetPerformanceConfigurationENS0_15PerformanceModeEi"]
-    // unsafe fn set_performance_config
 }
 
 #[skyline::main(name = "stratus")]
@@ -459,28 +477,123 @@ pub fn main() {
         let mut file = File::open("rom:/data.arc").unwrap();
         let mut archive = archive::Archive::read(&mut file);
 
+        struct UnsharedFileInfo {
+            real_info_index: u32,
+            group_offset: u32,
+            package_index: u32,
+        }
+
+        let mut unshare_cache = Hash40Map::default();
+        for package_idx in 0..archive.num_file_package() {
+            let package = archive.get_file_package(package_idx as u32).unwrap();
+            let infos = package.infos();
+            for idx in 0..infos.len() {
+                let info = infos.get_local(idx).unwrap();
+                let shared_info = info.entity().info();
+                if info.index() != shared_info.index() {
+                    let mut group_offset = 0;
+                    for prev_idx in (0..idx).rev().skip(1) {
+                        let prev_info = infos.get_local(prev_idx).unwrap();
+                        if !prev_info.flags().intersects(
+                            FileInfoFlags::IS_SHARED
+                                | FileInfoFlags::IS_REGIONAL
+                                | FileInfoFlags::IS_LOCALIZED,
+                        ) && !prev_info.desc().load_method().is_owned()
+                        {
+                            let data = prev_info.desc().data();
+                            group_offset = data.group_offset() + data.compressed_size();
+                            break;
+                        }
+                    }
+
+                    group_offset = (group_offset + 0xf) & 0x10;
+                    unshare_cache.insert(
+                        info.file_path().path_and_entity.hash40(),
+                        UnsharedFileInfo {
+                            real_info_index: info.index(),
+                            package_index: package.index(),
+                            group_offset,
+                        },
+                    );
+                }
+            }
+        }
+
         for (path, file) in ReadOnlyFileSystem::file_system().files() {
             if let Some(path) = archive.lookup_file_path_mut(*path) {
                 let path_hash = path.path_and_entity.hash40();
-                println!("Patching {}", path.path_and_entity.hash40().display());
+                // println!("Patching {}", path.path_and_entity.hash40().display());
 
-                let mut info = path.entity_mut().info_mut();
-                if info.path_ref().path_and_entity.hash40() != path_hash {
+                if let Some(unshare_info) = unshare_cache.get(&path_hash) {
+                    let mut info = path
+                        .into_archive_mut()
+                        .get_file_info_mut(unshare_info.real_info_index)
+                        .unwrap();
                     println!(
-                        "Patching {} <-> {}",
-                        path_hash.display(),
-                        info.path_ref().path_and_entity.hash40().display()
+                        "Unsharing {} from {}: ({:?} | {:?})",
+                        info.path_ref().path_and_entity.hash40().display(),
+                        info.path_ref()
+                            .entity()
+                            .info()
+                            .file_path()
+                            .path_and_entity
+                            .hash40()
+                            .display(),
+                        info.flags(),
+                        info.desc_ref().load_method()
                     );
-                    info = info.entity_mut().info_mut();
+                    let mut new_data =
+                        FileData::new_for_unsharing(file.size(), unshare_info.group_offset);
+
+                    // NOTE: This feels incorrect and like we are making assumptions.
+                    //  The problem that I was encountering which led me to write this line is
+                    //  swing.prc was being loaded via load method 4, which indicates a single file load.
+                    //  This is not what I remmeber being the case a long time ago, I'm not sure that this hack
+                    //  is reliable.
+                    //  When I left the compressed size as 0x0, then the ResInflateThread was never invoked
+                    //  on that file. It's likely an issue with ResLoadingThread. In the case that the file
+                    //  has a size of 0x0 it should probably just pass us through to ResInflateThread
+                    //  so that we can inflate the file ourselves.
+                    if !info.desc_ref().load_method().is_skip() {
+                        new_data.set_compressed_size(info.desc_ref().data().compressed_size());
+                    }
+                    let new_data_idx = info.archive_mut().push_file_data(new_data);
+
+                    let data_group_idx = info
+                        .archive()
+                        .get_file_package(unshare_info.package_index)
+                        .unwrap()
+                        .data_group()
+                        .index();
+                    let mut desc = info.desc_ref().clone();
+                    desc.set_data(new_data_idx);
+                    desc.set_group(data_group_idx);
+                    desc.set_load_method(FileLoadMethod::Owned(0));
+                    let new_desc_idx = info.archive_mut().push_file_desc(desc);
+                    let new_entity_idx = info.archive_mut().push_file_entity(FileEntity::new(
+                        unshare_info.package_index,
+                        unshare_info.real_info_index,
+                    ));
+                    info.flags().set(FileInfoFlags::IS_SHARED, false);
+                    info.flags().set(FileInfoFlags::IS_UNKNOWN_FLAG, false);
+                    info.set_entity(new_entity_idx);
+                    info.set_desc(new_desc_idx);
+                    info.path_mut().set_entity(new_entity_idx);
                 } else {
-                    println!("Patching {}", path_hash.display());
+                    let info = path.entity_mut().info_mut();
+                    let mut data = info.desc_mut().data_mut();
+
+                    data.patch(file.size());
                 }
-
-                let mut data = info.desc_mut().data_mut();
-
-                data.patch(file.size());
             }
         }
+
+        archive.reserialize();
+
+        archive
+            .lookup_file_path("fighter/mario/model/body/c00/model.numshb")
+            .unwrap();
+
         ReadOnlyArchive(archive)
     });
 
