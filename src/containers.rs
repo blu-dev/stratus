@@ -203,7 +203,7 @@ impl<'a, T> TableRef<'a, T> {
     }
 
     /// Fetches the archive that created this [`TableRef`]
-    pub(crate) fn archive(&self) -> &Archive {
+    pub(crate) fn archive(&self) -> &'a Archive {
         self.archive
     }
 
@@ -278,6 +278,28 @@ impl<'a, T> TableMut<'a, T> {
         // SAFETY: We took an exclusive reference when constructing this data,
         //      so this pointer is non-null and is aligned
         unsafe { &*self.archive }
+    }
+
+    pub(crate) fn into_archive_mut(self) -> &'a mut Archive {
+        // SAFETY:
+        // There are two invariants we must hold to be true:
+        //  - The invariant that we need to uphold is that we never invalid the *index*
+        //      of this table reference, since when we fetch the data we do so
+        //      via `get_unchecked` and `get_unchecked_mut`.
+        //      All of our containers (lookups and tables) only have methods to
+        //      *grow* and never to remove or to shrink -- cleanup is done at reserialization.
+        //  - The invariant that we are not creating double mutable access to the same
+        //      location in memory. Because this method returns a shorter
+        //      lifetime than 'a, we will not be able to reference this mutable
+        //      table reference and another at the same time, therefore
+        //      we maintain exclusive aliasing.
+        //      This means that something like:
+        //      let mut fp = archive.get_file_path_mut(ArcIndex::internal(0)).unwrap();
+        //      let mut archive = fp.archive_mut().get_file_path_mut(ArcIndex::internal(0)).unwrap();
+        //      fp.set_entity(ArcIndex::internal(0));
+        //      archive.set_entity(ArcIndex::external(2));
+        //      Would not compile!
+        unsafe { &mut *self.archive }
     }
 
     pub(crate) fn archive_mut(&mut self) -> &mut Archive {

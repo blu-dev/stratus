@@ -189,10 +189,18 @@ pub struct FileData {
 }
 
 impl TableMut<'_, FileData> {
+    pub fn is_compressed(&self) -> bool {
+        self.flags.contains(FileFlags::IS_COMPRESSED)
+    }
+
+    pub fn compressed_size(&self) -> u32 {
+        self.compressed_size
+    }
+
     pub fn patch(&mut self, new_size: u32) {
-        if !self.flags.contains(FileFlags::IS_COMPRESSED) {
-            self.compressed_size = new_size;
-        }
+        // if !self.flags.contains(FileFlags::IS_COMPRESSED) {
+        //     self.compressed_size = new_size;
+        // }
         self.decompressed_size = new_size;
     }
 }
@@ -256,11 +264,10 @@ pub struct FileDescriptor {
     load_method: u32,
 }
 
-impl TableMut<'_, FileDescriptor> {
-    pub fn data_mut(&mut self) -> TableMut<'_, FileData> {
-        println!("{self:x?}");
+impl<'a> TableMut<'a, FileDescriptor> {
+    pub fn data_mut(self) -> TableMut<'a, FileData> {
         let index = self.file_data;
-        self.archive_mut().get_file_data_mut(index).unwrap()
+        self.into_archive_mut().get_file_data_mut(index).unwrap()
     }
 }
 
@@ -273,17 +280,34 @@ pub struct FileInfo {
     flags: FileInfoFlags,
 }
 
-impl TableRef<'_, FileInfo> {
-    pub fn file_path(&self) -> TableRef<'_, FilePath> {
+impl<'a> TableRef<'a, FileInfo> {
+    pub fn file_path(&self) -> TableRef<'a, FilePath> {
         self.archive().get_file_path(self.path).unwrap()
+    }
+
+    pub fn entity(&self) -> TableRef<'a, FileEntity> {
+        self.archive().get_file_entity(self.entity).unwrap()
     }
 }
 
-impl TableMut<'_, FileInfo> {
-    pub fn desc_mut(&mut self) -> TableMut<'_, FileDescriptor> {
-        println!("{self:?} => {:?}", self.archive().get_file_path(self.path));
+impl<'a> TableMut<'a, FileInfo> {
+    pub fn path_ref(&self) -> TableRef<'_, FilePath> {
+        self.archive().get_file_path(self.path).unwrap()
+    }
+
+    pub fn entity_ref(&self) -> TableRef<'_, FileEntity> {
+        self.archive().get_file_entity(self.entity).unwrap()
+    }
+
+    pub fn entity_mut(self) -> TableMut<'a, FileEntity> {
+        let index = self.entity;
+        self.into_archive_mut().get_file_entity_mut(index).unwrap()
+    }
+
+    pub fn desc_mut(self) -> TableMut<'a, FileDescriptor> {
+        // println!("{self:?} => {:?}", self.archive().get_file_path(self.path));
         let index = self.desc;
-        self.archive_mut().get_file_desc_mut(index).unwrap()
+        self.into_archive_mut().get_file_desc_mut(index).unwrap()
     }
 }
 
@@ -294,11 +318,16 @@ pub struct FileEntity {
     info: u32,
 }
 
-impl TableMut<'_, FileEntity> {
-    pub fn info_mut(&mut self) -> TableMut<'_, FileInfo> {
-        println!("{self:?}");
+impl<'a> TableRef<'a, FileEntity> {
+    pub fn info(&self) -> TableRef<'a, FileInfo> {
+        self.archive().get_file_info(self.info).unwrap()
+    }
+}
+
+impl<'a> TableMut<'a, FileEntity> {
+    pub fn info_mut(self) -> TableMut<'a, FileInfo> {
         let index = self.info;
-        self.archive_mut().get_file_info_mut(index).unwrap()
+        self.into_archive_mut().get_file_info_mut(index).unwrap()
     }
 }
 
@@ -311,11 +340,10 @@ pub struct FilePath {
     file_name: Hash,
 }
 
-impl TableMut<'_, FilePath> {
-    pub fn entity_mut(&mut self) -> TableMut<'_, FileEntity> {
-        println!("{self:?}");
+impl<'a> TableMut<'a, FilePath> {
+    pub fn entity_mut(self) -> TableMut<'a, FileEntity> {
         let index = self.path_and_entity.data();
-        self.archive_mut().get_file_entity_mut(index).unwrap()
+        self.into_archive_mut().get_file_entity_mut(index).unwrap()
     }
 }
 

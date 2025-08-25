@@ -106,7 +106,6 @@ dependencies = [
 [[package]]
 name = "smash-hash"
 version = "0.1.0"
-source = "git+https://github.com/blu-dev/smash-hash#ae912a360fae851f8f04ef0caa6cd231b7b2cfac"
 
 [[package]]
 name = "stratus-mod-loader"
