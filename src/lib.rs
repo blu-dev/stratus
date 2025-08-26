@@ -12,11 +12,11 @@ use std::{
 
 use camino::Utf8Path;
 use skyline::hooks::InlineCtx;
-use smash_hash::{Hash40, Hash40Map};
+use smash_hash::Hash40Map;
 
 use crate::{
     archive::Archive,
-    data::{FileData, FileDescriptor, FileEntity, FileInfoFlags, FileLoadMethod, IntoHash},
+    data::{FileData, FileEntity, FileInfoFlags, FileLoadMethod},
     discover::FileSystem,
     hash_interner::{DisplayHash, HashMemorySlab, InternerCache},
 };
@@ -201,8 +201,6 @@ unsafe impl Sync for ReadOnlyArchive {}
 
 static ARCHIVE: OnceLock<ReadOnlyArchive> = OnceLock::new();
 
-static FILESYSTEM: OnceLock<FileSystem> = OnceLock::new();
-
 #[skyline::hook(offset = 0x3542a74, inline)]
 fn print_info(ctx: &skyline::hooks::InlineCtx) {
     let index = ctx.registers[8].w();
@@ -224,7 +222,7 @@ extern "C" {
     fn wait_event(ptr: u64);
 }
 
-fn handle_io_swaps(ctx: &mut InlineCtx) {
+fn handle_inflate_io_swaps(ctx: &mut InlineCtx) {
     let res_service = ctx.registers[19].x() as *mut u8;
     let offset_into_read = unsafe { *res_service.add(0x220).cast::<u64>() };
     let mut x20 = ctx.registers[20].x();
@@ -283,11 +281,10 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
         .map(|info| info.file_path().path_and_entity.hash40());
 
     if let Some(path) = path {
-        if true {
+        if cfg!(feature = "verbose_logging") {
             let offset_into_read = unsafe { *res_service.add(0x220).cast::<u64>() };
-            let mut x20 = ctx.registers[20].x();
-            let mut x21 = ctx.registers[21].x();
-            let mut x25 = ctx.registers[25].x();
+            let x20 = ctx.registers[20].x();
+            let x21 = ctx.registers[21].x();
             let target_offset_into_read = x20 + x21;
             println!(
                 "Attempting to load {} with cursor {:#x} | {:#x} | {:#x} | {:#x} ({} / {})",
@@ -312,28 +309,41 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
             // This alignment is going to be 0x1000 (page alignment) for graphics archives (BNTX and NUTEXB)
             let alignment = ctx.registers[0].x();
 
-            // SAFETY: we check the null-ness of the pointer after allocation
-            let buffer = unsafe {
-                // SAFETY: We use unchecked here because the alignment comes from the game. It appears to either be 0x10 or 0x1000, both of which are powers
-                //  of two, so I'm not concerned about the alignment being off.
-                std::alloc::alloc(Layout::from_size_align_unchecked(
-                    size as usize,
-                    alignment as usize,
-                ))
-            };
+            // We are checking the load method here. If it is 4 (single file) then that means we loaded the pointer in ResLoadingThread
+            // and don't need to repeat the file IO here. The data_ptr should get replaced the next time that the game needs to load
+            // something so we don't need to worry about other file loads reading from that pointer
+            if unsafe { *res_service.add(0x234).cast::<u32>() == 0x4 } {
+                ptr = unsafe { *res_service.add(0x218).cast::<*mut u8>() };
+            } else {
+                // SAFETY: we check the null-ness of the pointer after allocation
+                let buffer = unsafe {
+                    // SAFETY: We use unchecked here because the alignment comes from the game. It appears to either be 0x10 or 0x1000, both of which are powers
+                    //  of two, so I'm not concerned about the alignment being off.
+                    std::alloc::alloc(Layout::from_size_align_unchecked(
+                        size as usize,
+                        alignment as usize,
+                    ))
+                };
 
-            assert!(!buffer.is_null());
+                assert!(!buffer.is_null());
 
-            // SAFETY: we assert that the slice is non-null, it's also allocated to the correct length and alignment above
-            let slice = unsafe { std::slice::from_raw_parts_mut(buffer, size as usize) };
+                // SAFETY: we assert that the slice is non-null, it's also allocated to the correct length and alignment above
+                let slice = unsafe { std::slice::from_raw_parts_mut(buffer, size as usize) };
 
-            // SAFETY: See above
-            let mut file = std::fs::File::open(unsafe { &BUFFER }).unwrap();
-            let amount_read = file.read(slice).unwrap();
+                // SAFETY: See above
+                let mut file = std::fs::File::open(unsafe { &BUFFER }).unwrap();
+                let amount_read = file.read(slice).unwrap();
 
-            assert_eq!(amount_read, size as usize);
+                assert_eq!(amount_read, size as usize);
 
-            ptr = buffer;
+                ptr = buffer;
+
+                // We need to manually handle the IO swap mechanism here. The game will "correct" the IO swaps on the next file but either
+                // I'm misunderstanding something (likely) or that codepath is actually bugged for what it's supposed to do. So instead
+                // we will manually correct the IO swaps here.
+                handle_inflate_io_swaps(ctx);
+            }
+
             // Register x28 is the flags for the FileData that we are loading. Setting these to 0x0 will activate the codepath
             // that enters our skip_load_hook(_2) hooks.
             //
@@ -341,11 +351,6 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
             // literally zero files in the game have that flag, not that it would impact what we are doing here
             ctx.registers[28].set_x(0x0);
             DID_LOAD.store(true, Ordering::Relaxed);
-
-            // We need to manually handle the IO swap mechanism here. The game will "correct" the IO swaps on the next file but either
-            // I'm misunderstanding something (likely) or that codepath is actually bugged for what it's supposed to do. So instead
-            // we will manually correct the IO swaps here.
-            handle_io_swaps(ctx);
         } else {
             ptr = unsafe { jemalloc(ctx.registers[0].x(), ctx.registers[1].x()) };
         }
@@ -379,7 +384,7 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
  */
 #[skyline::hook(offset = 0x3544338, inline)]
 fn skip_load_hook(ctx: &mut InlineCtx) {
-    if DID_LOAD.swap(false, Ordering::SeqCst) {
+    if DID_LOAD.swap(false, Ordering::Relaxed) {
         ctx.registers[3].set_x(2);
     } else if ctx.registers[23].x() <= ctx.registers[8].x() {
         ctx.registers[3].set_x(1);
@@ -431,6 +436,128 @@ fn skip_load_hook_p2(ctx: &mut InlineCtx) {
     }
 }
 
+static mut LOADING_THREAD_PATCHED_POINTER: Option<*mut u8> = None;
+
+#[allow(static_mut_refs)]
+#[skyline::hook(offset = 0x3542f64, inline)]
+fn process_single_patched_file_request(ctx: &mut InlineCtx) {
+    static mut BUFFER: String = String::new();
+
+    // This address is to point right after the instruction we hook.
+    // This is a little sketchy because skyline technically can replace 5 instructions for a very long
+    // instead the single instruction that we are depending on. The idea here is that we replace the instruction
+    // we hook with br x3, and if we need to take the vanilla codepath we are going to jump to the instruction after this one.
+    // If we don't want to take the vanilla codepath, we are going to jump to two instructions after this one,
+    // and fake the return value
+    static mut OFFSET_ABSOLUTE_ADDRESS: u64 = 0x0;
+
+    // SAFETY: Referencing OFFSET_ABSOLUTE_ADDRESS is effectively a function local variable, it never gets referenced outside this thread
+    if unsafe { OFFSET_ABSOLUTE_ADDRESS } == 0 {
+        // SAFETY: See above, and our plugin cannot exist outside of the skyline runtime, so calling that function is safe
+        unsafe {
+            OFFSET_ABSOLUTE_ADDRESS = skyline::hooks::getRegionAddress(skyline::hooks::Region::Text)
+                .cast::<u8>()
+                .add(0x3542f68) as u64;
+        }
+    }
+
+    let file_info_idx = ctx.registers[20].w();
+    let archive = ReadOnlyArchive::get();
+    let Some(info) = archive.get_file_info(file_info_idx) else {
+        // LOG??
+        panic!("Invalid file info index provided to ResLoadingThread");
+    };
+
+    let path = info.file_path().path_and_entity.hash40();
+
+    // SAFETY: Referencing BUFFER here is safe since this is an inline hook only ever called from within
+    // ResLoadingThread. It effectively becomes a function local variable
+    if let Some(size) =
+        ReadOnlyFileSystem::file_system().get_full_file_path(path, unsafe { &mut BUFFER })
+    {
+        // We know that we are loading a file as a single file request, let's make use of our file IO thread to load
+        // this instead of trying to read anything from the data.arc
+        // For now we are still going to pass it over to the ResInflateThread. ResLoadingThread will configure the load method
+        // as method #4 which we can check inside of our jemalloc_hook.
+        //
+        // Loading the file here is actually a requirement for unshared files, since we set their compressed_size to 0x0 so that
+        // if they are loaded via any other load method, or as part of a package/group, they don't advance the buffer cursor
+        // at all
+
+        // TODO: Change the definition of FileInfoFlags to remove IS_REGULAR_FILE and IS_GRAPHICS_ARCHIVE,
+        //      the lower 15 bits are used for buffer alignment
+        let buffer_alignment = info.flags().bits() & 0x7FFF;
+
+        // This is only a sanity check to make sure that the above knowledge is true
+        #[cfg(any(debug_assertions, feature = "sanity_checks"))]
+        {
+            assert!(buffer_alignment.is_power_of_two());
+        }
+
+        // TODO: Remove unwrap
+        let buffer = unsafe {
+            std::alloc::alloc(
+                Layout::from_size_align(size as usize, buffer_alignment as usize).unwrap(),
+            )
+        };
+
+        assert!(!buffer.is_null());
+
+        // Allocator should confirm this for us but I don't want any bugs cropping up because of it
+        #[cfg(any(debug_assertions, feature = "sanity_checks"))]
+        {
+            assert_eq!(buffer as u64 % buffer_alignment as u64, 0x0);
+        }
+
+        // SAFETY: We assert on the alignment of the slice, the length we just have to trust the allocator
+        let slice = unsafe { std::slice::from_raw_parts_mut(buffer, size as usize) };
+
+        // SAFETY: See above
+        let mut file = std::fs::File::open(unsafe { &BUFFER }).unwrap();
+        let amount_read = file.read(slice).unwrap();
+
+        // TODO: Should this be sanity?
+        assert_eq!(amount_read, size as usize);
+
+        // OUT VARIABLES:
+        // - x0 is supposed to be the return value of the vanilla read function.
+        // - x21 is the compressed size read from the FileData. We are going to set our compressed size to the size
+        //    of the pointer buffer, that way it accurately reflects the size of the pointer we are about to give the resource service
+        // - x3 is the address of the instruction to jump to, we want to jump past the vanilla codepath so we add 4 (size of one instruction)
+        //    to the cached address
+        ctx.registers[21].set_x(size as u64);
+        ctx.registers[0].set_x(size as u64);
+        // SAFETY: See above on static mut variables
+        ctx.registers[3].set_x(unsafe { OFFSET_ABSOLUTE_ADDRESS + 4 });
+
+        // SAFETY: We need to track this pointer down a little bit when we hand it over to ResInflateThread. Storing it in a static mut is fine
+        // as long as we only reference it from code that runs inside of this loading thread.
+        unsafe { LOADING_THREAD_PATCHED_POINTER = Some(buffer) };
+    } else {
+        // OUT VARIABLES: This is the vanilla codepath, so we need to set the pointer to the instruction we want to jump to
+        //  as well as simulate the instruction that we replaced (mov x2, x21)
+
+        ctx.registers[2].set_x(ctx.registers[21].x());
+
+        // SAFETY: See above on static mut variables
+        ctx.registers[3].set_x(unsafe { OFFSET_ABSOLUTE_ADDRESS });
+    }
+}
+
+/* This replaces ResLoadingThread's assigment of res_service->data_ptr to the data we loaded above
+ *  if we loaded it. This codepath will only fire for single file loads.
+ */
+#[allow(static_mut_refs)]
+#[skyline::hook(offset = 0x3542fc4, inline)]
+fn loading_thread_assign_patched_pointer(ctx: &mut InlineCtx) {
+    // SAFETY: We are only accessing this static mut inside of the ResLoadingThread, so it's not worth the overhead
+    // of a mutex lock here
+    if let Some(pointer) = unsafe { LOADING_THREAD_PATCHED_POINTER.take() } {
+        println!("Setting pointer {pointer:#p}");
+        ctx.registers[8].set_x(pointer as u64);
+    }
+}
+
 /* This replaces the game's reading and decompression of the file tables. We already do this in order to patch the filesystem
  *  before the game gets around to it, so we can save time on boot by just providing the game with the result of the work
  *  that we have already done.
@@ -451,6 +578,9 @@ fn patch_res_threads() {
 
     // skip_load_hook_2
     Patch::in_text(0x3544758).data(0xB5001583u32).unwrap(); // cbnz x3, #0x2b0 (replacing ldr x2, [sp, #0x28])
+
+    // process_single_patched_file_request
+    Patch::in_text(0x3542f64).data(0xD61F0060u32).unwrap(); // br x3 (replacing mov x2, x21)
 
     Patch::in_text(0x3750c2c).nop().unwrap();
 }
@@ -542,22 +672,12 @@ pub fn main() {
                         info.flags(),
                         info.desc_ref().load_method()
                     );
-                    let mut new_data =
-                        FileData::new_for_unsharing(file.size(), unshare_info.group_offset);
-
-                    // NOTE: This feels incorrect and like we are making assumptions.
-                    //  The problem that I was encountering which led me to write this line is
-                    //  swing.prc was being loaded via load method 4, which indicates a single file load.
-                    //  This is not what I remmeber being the case a long time ago, I'm not sure that this hack
-                    //  is reliable.
-                    //  When I left the compressed size as 0x0, then the ResInflateThread was never invoked
-                    //  on that file. It's likely an issue with ResLoadingThread. In the case that the file
-                    //  has a size of 0x0 it should probably just pass us through to ResInflateThread
-                    //  so that we can inflate the file ourselves.
-                    if !info.desc_ref().load_method().is_skip() {
-                        new_data.set_compressed_size(info.desc_ref().data().compressed_size());
-                    }
-                    let new_data_idx = info.archive_mut().push_file_data(new_data);
+                    let new_data_idx =
+                        info.archive_mut()
+                            .push_file_data(FileData::new_for_unsharing(
+                                file.size(),
+                                unshare_info.group_offset,
+                            ));
 
                     let data_group_idx = info
                         .archive()
@@ -565,6 +685,7 @@ pub fn main() {
                         .unwrap()
                         .data_group()
                         .index();
+
                     let mut desc = info.desc_ref().clone();
                     desc.set_data(new_data_idx);
                     desc.set_group(data_group_idx);
@@ -590,6 +711,18 @@ pub fn main() {
 
         archive.reserialize();
 
+        println!(
+            "C01 Swing.prc: {:p}",
+            archive
+                .lookup_file_path("fighter/peach/motion/body/c01/swing.prc")
+                .unwrap()
+                .entity()
+                .info()
+                .desc()
+                .data()
+                .ptr()
+        );
+
         archive
             .lookup_file_path("fighter/mario/model/body/c00/model.numshb")
             .unwrap();
@@ -606,6 +739,8 @@ pub fn main() {
         skip_load_arc_table,
         jemalloc_hook,
         skip_load_hook,
-        skip_load_hook_p2
+        skip_load_hook_p2,
+        process_single_patched_file_request,
+        loading_thread_assign_patched_pointer
     );
 }

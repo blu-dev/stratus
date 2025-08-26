@@ -20,6 +20,7 @@ smash-hash = { path = "../smash-hash/smash-hash" }
 
 [features]
 sanity_checks = []
+verbose_logging = []
 
 [profile.dev]
 panic = "abort"

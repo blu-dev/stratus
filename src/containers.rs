@@ -230,6 +230,11 @@ impl<'a, T> TableRef<'a, T> {
     pub(crate) fn index(&self) -> u32 {
         self.index
     }
+
+    pub(crate) fn ptr(&self) -> *const T {
+        // SAFETY: We assert it is in the table at construction
+        unsafe { self.table.get_unchecked(self.index) }
+    }
 }
 
 /// Represents a mutable reference to a piece of data in a table
