@@ -123,9 +123,10 @@ fn init_hashes() {
             HashMemorySlab::from_blob(blob.into_boxed_slice(), meta.into_boxed_slice())
         } else {
             let mut slab = HashMemorySlab::new();
+            let mut cache = slab.create_cache();
 
             if let Ok(file) = std::fs::read_to_string(hashes_src) {
-                let mut cache = InternerCache::default();
+                // let mut cache = InternerCache::default();
                 for line in file.lines() {
                     let path = Utf8Path::new(line);
                     if let Some(extension) = path.extension() {
@@ -160,7 +161,7 @@ fn init_hashes() {
             LoadMethod::Missing => println!("[stratus::hashes] No hash blob generated"),
         }
 
-        let mut cache = InternerCache::default();
+        let mut cache = slab.create_cache();
         let file_system = discover::discover_and_update_hashes(&mut slab, &mut cache);
         slab.finalize(cache);
 

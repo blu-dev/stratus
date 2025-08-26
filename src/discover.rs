@@ -96,7 +96,13 @@ pub fn discover_and_update_hashes(
                 folder.path(),
                 folder.path(),
                 &mut |file_path: &Utf8Path, len: u32| {
-                    let range = hash.intern_path(cache, file_path);
+                    if let Some(file_name) = file_path.file_name() {
+                        hash.intern_path(cache, Utf8Path::new(file_name));
+                    }
+                    if let Some(ext) = file_path.extension() {
+                        hash.intern_path(cache, Utf8Path::new(ext));
+                    }
+                    hash.intern_path(cache, file_path).range();
                     file_system.files.insert(
                         file_path.into_hash(),
                         DiscoveredFile {

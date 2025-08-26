@@ -88,7 +88,7 @@ pub unsafe fn allocate_uninit(size: NonZeroUsize, align: NonZeroUsize) -> Box<[u
 }
 
 #[repr(transparent)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct SmolRange(u32);
 
 impl SmolRange {
@@ -114,11 +114,30 @@ pub struct HashLookupKey {
     pub range: SmolRange,
 }
 
-#[derive(Default)]
+// impl HashLookupKey {
+//     const fn from_hash_and_range(hash: Hash40, range: SmolRange) -> Self {
+//         Self {
+//             shifted_hash: hash
+//         }
+//     }
+// }
+
 pub struct InternerCache {
     component_index: Hash40Map<u24>,
     cached_paths: Hash40Map<u24>,
     fix_hash_indices: Vec<(u24, Hash40)>,
+    previous_bucket_lengths: Vec<usize>,
+}
+
+impl InternerCache {
+    fn new() -> Self {
+        Self {
+            component_index: Hash40Map::default(),
+            cached_paths: Hash40Map::default(),
+            fix_hash_indices: vec![],
+            previous_bucket_lengths: vec![],
+        }
+    }
 }
 
 pub struct HashMemorySlab {
@@ -135,6 +154,8 @@ pub struct HashMemorySlab {
 
     hashes: *mut [HashLookupKey],
     bucket_lengths: *mut [u32],
+
+    was_finalized: bool,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -268,6 +289,7 @@ impl HashMemorySlab {
             component_len: 0,
             hashes: lookup,
             bucket_lengths,
+            was_finalized: false,
         }
     }
 
@@ -277,6 +299,16 @@ impl HashMemorySlab {
             (*this.bucket_lengths).fill(0u32);
         }
         this
+    }
+
+    pub fn create_cache(&self) -> InternerCache {
+        let mut cache = InternerCache::new();
+        if self.was_finalized {
+            cache
+                .previous_bucket_lengths
+                .extend(unsafe { (&*self.bucket_lengths).iter().map(|len| *len as usize) });
+        }
+        cache
     }
 
     pub fn report(&self) -> MemoryUsageReport {
@@ -325,7 +357,32 @@ impl HashMemorySlab {
         this.byte_len = usize::from_le(slice[0]);
         this.string_len = usize::from_le(slice[1]);
         this.component_len = usize::from_le(slice[2]);
+        this.was_finalized = true;
         this
+    }
+
+    fn try_cache_or_finalized_self(
+        this: &Self,
+        cache: &InternerCache,
+        hash: Hash40,
+    ) -> Option<u24> {
+        cache.cached_paths.get(&hash).copied().or_else(|| {
+            if this.was_finalized {
+                let bucket_idx = hash.crc32() as usize % HASH_BUCKET_COUNT;
+                let len = cache.previous_bucket_lengths[bucket_idx];
+                let start_idx = bucket_idx * HASH_BUCKET_SIZE;
+                let bucket = unsafe { &(&*this.hashes)[start_idx..start_idx + len] };
+
+                let shifted_hash = (hash.raw() >> 8) as u32;
+
+                match bucket.binary_search_by(|a| a.shifted_hash.cmp(&shifted_hash)) {
+                    Ok(idx) => Some(u24::from_u32(idx as u32)),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            }
+        })
     }
 
     pub fn intern_path(&mut self, cache: &mut InternerCache, path: &Utf8Path) -> SmolRange {
@@ -334,7 +391,7 @@ impl HashMemorySlab {
 
         let full_hash = Hash40::const_new(path.as_str());
 
-        if let Some(cached) = cache.cached_paths.get(&full_hash) {
+        if let Some(cached) = Self::try_cache_or_finalized_self(self, cache, full_hash) {
             unsafe {
                 return (*self.hashes)[cached.to_u32() as usize].range;
             }
@@ -345,7 +402,7 @@ impl HashMemorySlab {
             current = parent;
 
             let parent_hash = Hash40::const_new(current.as_str());
-            if let Some(cached) = cache.cached_paths.get(&parent_hash) {
+            if let Some(cached) = Self::try_cache_or_finalized_self(self, cache, parent_hash) {
                 debug_assert_eq!(cached.to_u32() & IS_INTERNED_COMPONENT, 0x0);
                 unsafe {
                     (*self.components)[self.component_len] =
@@ -423,6 +480,14 @@ impl HashMemorySlab {
                 (&mut (*self.hashes))[start_idx..start_idx + len]
                     .sort_unstable_by(|a, b| a.shifted_hash.cmp(&b.shifted_hash));
             }
+
+            let mut prev: Option<u32> = None;
+            for hash in unsafe { (&*self.hashes)[start_idx..start_idx + len].iter() } {
+                if let Some(prev) = prev {
+                    assert_ne!(hash.shifted_hash, prev);
+                }
+                prev = Some(hash.shifted_hash);
+            }
         }
 
         let mut relookup: Hash40Map<u24> = Hash40Map::default();
@@ -456,6 +521,8 @@ impl HashMemorySlab {
                     u24::from_u32(new_index.to_u32() | IS_INTERNED_COMPONENT);
             }
         }
+
+        self.was_finalized = true;
     }
 
     pub fn dump_blob(&self) -> Vec<u8> {
