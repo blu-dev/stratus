@@ -82,6 +82,13 @@ impl Display for Hash {
 }
 
 impl Hash {
+    pub const fn from_hash40(hash: Hash40) -> Self {
+        Self {
+            crc: hash.crc32(),
+            len: hash.length() as u32,
+        }
+    }
+
     pub const fn hash40(self) -> Hash40 {
         Hash40::from_raw(((self.len as u64) << 32) | self.crc as u64)
     }
@@ -159,6 +166,7 @@ bitflags::bitflags! {
         const IS_REGIONAL = 1 << 16;
         const IS_SHARED = 1 << 20;
         const IS_UNKNOWN_FLAG = 1 << 21;
+        const IS_RESHARED = 1 << 31;
     }
 
     #[repr(transparent)]
@@ -312,6 +320,10 @@ impl FileDescriptor {
         self.load_method = method.into();
     }
 
+    pub fn group_idx(&self) -> u32 {
+        self.group
+    }
+
     pub fn set_group(&mut self, group: u32) {
         self.group = group;
     }
@@ -340,6 +352,8 @@ pub struct FileInfo {
 }
 
 impl FileInfo {
+    // const RESHARED_FILE_PATH_BIT: u32 = 0x80000000;
+
     pub fn flags(&self) -> FileInfoFlags {
         self.flags
     }
@@ -347,9 +361,59 @@ impl FileInfo {
     pub fn set_flags(&mut self, flags: FileInfoFlags) {
         self.flags = flags;
     }
+
+    pub fn set_path_as_reshared(&mut self) {
+        assert!(!self.flags.intersects(FileInfoFlags::IS_RESHARED));
+        // assert_eq!(self.path & Self::RESHARED_FILE_PATH_BIT, 0x00);
+        self.flags |= FileInfoFlags::IS_RESHARED;
+        // self.path |= Self::RESHARED_FILE_PATH_BIT;
+    }
+
+    pub fn set_path(&mut self, path: u32) {
+        self.path = path;
+    }
+
+    pub fn set_entity(&mut self, entity: u32) {
+        self.entity = entity;
+    }
+
+    pub fn set_desc(&mut self, desc: u32) {
+        self.desc = desc;
+    }
+}
+
+pub enum TryFilePathResult<'a> {
+    FilePath(TableRef<'a, FilePath>),
+    Reshared(TableRef<'a, FilePath>),
+    Missing,
+}
+
+impl<'a> TryFilePathResult<'a> {
+    pub fn unwrap(self) -> TableRef<'a, FilePath> {
+        match self {
+            Self::FilePath(path) | Self::Reshared(path) => path,
+            Self::Missing => panic!("FilePath is missing"),
+        }
+    }
 }
 
 impl<'a> TableRef<'a, FileInfo> {
+    pub fn try_file_path(&self) -> TryFilePathResult<'a> {
+        let Some(path) = self
+            .archive()
+            .get_file_path(self.path /* & !FileInfo::RESHARED_FILE_PATH_BIT*/)
+        else {
+            return TryFilePathResult::Missing;
+        };
+
+        if self.flags.intersects(FileInfoFlags::IS_RESHARED) {
+            // if self.path & FileInfo::RESHARED_FILE_PATH_BIT != 0 {
+            TryFilePathResult::Reshared(path)
+        } else {
+            TryFilePathResult::FilePath(path)
+        }
+    }
+
     pub fn file_path(&self) -> TableRef<'a, FilePath> {
         self.archive().get_file_path(self.path).unwrap()
     }
@@ -387,14 +451,6 @@ impl<'a> TableMut<'a, FileInfo> {
         self.into_archive_mut().get_file_entity_mut(index).unwrap()
     }
 
-    pub fn set_entity(&mut self, entity: u32) {
-        self.entity = entity;
-    }
-
-    pub fn set_desc(&mut self, desc: u32) {
-        self.desc = desc;
-    }
-
     pub fn desc_ref(&self) -> TableRef<'_, FileDescriptor> {
         self.archive().get_file_desc(self.desc).unwrap()
     }
@@ -420,6 +476,10 @@ impl FileEntity {
             info,
         }
     }
+
+    pub fn package_or_group(&self) -> u32 {
+        self.package_or_group
+    }
 }
 
 impl<'a> TableRef<'a, FileEntity> {
@@ -442,6 +502,39 @@ pub struct FilePath {
     ext_and_version: HashWithData,
     parent: Hash,
     file_name: Hash,
+}
+
+impl FilePath {
+    pub fn from_parts(
+        path: Hash40,
+        parent: Hash40,
+        file_name: Hash40,
+        extension: Hash40,
+        entity: u32,
+    ) -> Self {
+        Self {
+            path_and_entity: HashWithData::new(path, entity),
+            ext_and_version: HashWithData::new(extension, 0xFFFFFF),
+            parent: Hash::from_hash40(parent),
+            file_name: Hash::from_hash40(file_name),
+        }
+    }
+
+    pub fn path(&self) -> Hash40 {
+        self.path_and_entity.hash40()
+    }
+
+    pub fn parent(&self) -> Hash40 {
+        self.parent.hash40()
+    }
+
+    pub fn file_name(&self) -> Hash40 {
+        self.file_name.hash40()
+    }
+
+    pub fn extension(&self) -> Hash40 {
+        self.ext_and_version.hash40()
+    }
 }
 
 impl<'a> TableRef<'a, FilePath> {
@@ -482,10 +575,7 @@ impl Debug for FixTrailingSlash<'_> {
 impl Debug for FilePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FilePath")
-            .field(
-                "path_and_entity",
-                &FixTrailingSlashWithData(&self.path_and_entity),
-            )
+            .field("path_and_entity", &self.path_and_entity)
             .field("ext_and_version", &self.ext_and_version)
             .field("parent", &FixTrailingSlash(&self.parent))
             .field("file_name", &self.file_name)
@@ -514,6 +604,19 @@ impl<'a> TableRef<'a, FilePackage> {
             .unwrap()
     }
 
+    pub fn file_group(&self) -> Option<TableRef<'a, FileGroup>> {
+        let dg = self
+            .archive()
+            .get_file_group(self.path_and_group.data())
+            .unwrap();
+
+        if dg.redirection > self.archive().num_file_package() as u32 {
+            Some(self.archive().get_file_group(dg.redirection).unwrap())
+        } else {
+            None
+        }
+    }
+
     pub fn infos(&self) -> TableSliceRef<'a, FileInfo> {
         self.archive()
             .get_file_info_slice(self.info_start, self.info_count)
@@ -534,6 +637,14 @@ pub struct FileGroup {
     child_start: u32,
     child_count: u32,
     redirection: u32,
+}
+
+impl<'a> TableRef<'a, FileGroup> {
+    pub fn file_info_slice(&self) -> TableSliceRef<'a, FileInfo> {
+        self.archive()
+            .get_file_info_slice(self.child_start, self.child_count)
+            .unwrap()
+    }
 }
 
 #[repr(C)]

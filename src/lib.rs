@@ -1,5 +1,6 @@
 use std::{
     alloc::Layout,
+    collections::HashMap,
     fs::File,
     io::Read,
     ops::Deref,
@@ -16,7 +17,9 @@ use smash_hash::Hash40Map;
 
 use crate::{
     archive::Archive,
-    data::{FileData, FileEntity, FileInfoFlags, FileLoadMethod},
+    data::{
+        FileData, FileEntity, FileInfo, FileInfoFlags, FileLoadMethod, FilePath, TryFilePathResult,
+    },
     discover::FileSystem,
     hash_interner::{DisplayHash, HashMemorySlab, InternerCache},
 };
@@ -277,86 +280,102 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
     let current_index = ctx.registers[27].w();
     let absolute_index = unsafe { *res_service.add(0x230).cast::<u32>() } + current_index;
     let ptr: *mut u8;
-    let path = ReadOnlyArchive::get()
-        .get_file_info(absolute_index)
-        .map(|info| info.file_path().path_and_entity.hash40());
 
-    if let Some(path) = path {
-        if cfg!(feature = "verbose_logging") {
-            let offset_into_read = unsafe { *res_service.add(0x220).cast::<u64>() };
-            let x20 = ctx.registers[20].x();
-            let x21 = ctx.registers[21].x();
-            let target_offset_into_read = x20 + x21;
-            println!(
-                "Attempting to load {} with cursor {:#x} | {:#x} | {:#x} | {:#x} ({} / {})",
-                path.display(),
-                offset_into_read,
-                target_offset_into_read,
-                ctx.registers[25].x(),
-                unsafe { *res_service.add(0x234).cast::<u32>() },
-                current_index,
-                unsafe { *res_service.add(0x22C).cast::<u32>() }
-            );
-        }
+    let Some(info) = ReadOnlyArchive::get().get_file_info(absolute_index) else {
+        panic!("ResInflateThread handed invalid info index");
+    };
 
-        // SAFETY: This path is only going to be called from the ResInflateThread, so this being a "static" variable is effectively a TLS variable
-        if let Some(size) =
-            ReadOnlyFileSystem::file_system().get_full_file_path(path, unsafe { &mut BUFFER })
-        {
-            // SAFETY: See above
-            println!("Replacing {}", unsafe { &BUFFER });
-
-            // We need to create the same alignment on our buffer the game is expecting.
-            // This alignment is going to be 0x1000 (page alignment) for graphics archives (BNTX and NUTEXB)
-            let alignment = ctx.registers[0].x();
-
-            // We are checking the load method here. If it is 4 (single file) then that means we loaded the pointer in ResLoadingThread
-            // and don't need to repeat the file IO here. The data_ptr should get replaced the next time that the game needs to load
-            // something so we don't need to worry about other file loads reading from that pointer
-            if unsafe { *res_service.add(0x234).cast::<u32>() == 0x4 } {
-                ptr = unsafe { *res_service.add(0x218).cast::<*mut u8>() };
-            } else {
-                // SAFETY: we check the null-ness of the pointer after allocation
-                let buffer = unsafe {
-                    // SAFETY: We use unchecked here because the alignment comes from the game. It appears to either be 0x10 or 0x1000, both of which are powers
-                    //  of two, so I'm not concerned about the alignment being off.
-                    std::alloc::alloc(Layout::from_size_align_unchecked(
-                        size as usize,
-                        alignment as usize,
-                    ))
-                };
-
-                assert!(!buffer.is_null());
-
-                // SAFETY: we assert that the slice is non-null, it's also allocated to the correct length and alignment above
-                let slice = unsafe { std::slice::from_raw_parts_mut(buffer, size as usize) };
-
-                // SAFETY: See above
-                let mut file = std::fs::File::open(unsafe { &BUFFER }).unwrap();
-                let amount_read = file.read(slice).unwrap();
-
-                assert_eq!(amount_read, size as usize);
-
-                ptr = buffer;
-
-                // We need to manually handle the IO swap mechanism here. The game will "correct" the IO swaps on the next file but either
-                // I'm misunderstanding something (likely) or that codepath is actually bugged for what it's supposed to do. So instead
-                // we will manually correct the IO swaps here.
-                handle_inflate_io_swaps(ctx);
+    let path = match info.try_file_path() {
+        TryFilePathResult::FilePath(path) => path.path_and_entity.hash40(),
+        TryFilePathResult::Reshared(path) => {
+            #[cfg(not(feature = "verbose_logging"))]
+            {
+                let _ = path;
             }
 
-            // Register x28 is the flags for the FileData that we are loading. Setting these to 0x0 will activate the codepath
-            // that enters our skip_load_hook(_2) hooks.
-            //
-            // For compressed files this will be 0x3, for uncompressed files it will be 0x0. Technically 0x2 is also supported but
-            // literally zero files in the game have that flag, not that it would impact what we are doing here
-            ctx.registers[28].set_x(0x0);
-            DID_LOAD.store(true, Ordering::Relaxed);
-        } else {
-            ptr = unsafe { jemalloc(ctx.registers[0].x(), ctx.registers[1].x()) };
+            #[cfg(feature = "verbose_logging")]
+            {
+                println!("Encountered reshared file pointing at '{}''s original data, skipping file replacement", path.path_and_entity.hash40().display());
+            }
+
+            let ptr = unsafe { jemalloc(ctx.registers[0].x(), ctx.registers[1].x()) };
+            ctx.registers[0].set_x(ptr as u64);
+            return;
         }
+        TryFilePathResult::Missing => panic!("File info is not pointing to a real file path"),
+    };
+
+    if cfg!(feature = "verbose_logging") {
+        let offset_into_read = unsafe { *res_service.add(0x220).cast::<u64>() };
+        let x20 = ctx.registers[20].x();
+        let x21 = ctx.registers[21].x();
+        let target_offset_into_read = x20 + x21;
+        println!(
+            "Attempting to load {} with cursor {:#x} | {:#x} | {:#x} | {:#x} ({} / {})",
+            path.display(),
+            offset_into_read,
+            target_offset_into_read,
+            ctx.registers[25].x(),
+            unsafe { *res_service.add(0x234).cast::<u32>() },
+            current_index,
+            unsafe { *res_service.add(0x22C).cast::<u32>() }
+        );
+    }
+
+    // SAFETY: This path is only going to be called from the ResInflateThread, so this being a "static" variable is effectively a TLS variable
+    if let Some(size) =
+        ReadOnlyFileSystem::file_system().get_full_file_path(path, unsafe { &mut BUFFER })
+    {
+        // SAFETY: See above
+        println!("Replacing {}", unsafe { &BUFFER });
+
+        // We need to create the same alignment on our buffer the game is expecting.
+        // This alignment is going to be 0x1000 (page alignment) for graphics archives (BNTX and NUTEXB)
+        let alignment = ctx.registers[0].x();
+
+        // We are checking the load method here. If it is 4 (single file) then that means we loaded the pointer in ResLoadingThread
+        // and don't need to repeat the file IO here. The data_ptr should get replaced the next time that the game needs to load
+        // something so we don't need to worry about other file loads reading from that pointer
+        if unsafe { *res_service.add(0x234).cast::<u32>() == 0x4 } && false {
+            ptr = unsafe { *res_service.add(0x218).cast::<*mut u8>() };
+        } else {
+            // SAFETY: we check the null-ness of the pointer after allocation
+            let buffer = unsafe {
+                // SAFETY: We use unchecked here because the alignment comes from the game. It appears to either be 0x10 or 0x1000, both of which are powers
+                //  of two, so I'm not concerned about the alignment being off.
+                std::alloc::alloc(Layout::from_size_align_unchecked(
+                    size as usize,
+                    alignment as usize,
+                ))
+            };
+
+            assert!(!buffer.is_null());
+
+            // SAFETY: we assert that the slice is non-null, it's also allocated to the correct length and alignment above
+            let slice = unsafe { std::slice::from_raw_parts_mut(buffer, size as usize) };
+
+            // SAFETY: See above
+            let mut file = std::fs::File::open(unsafe { &BUFFER }).unwrap();
+            let amount_read = file.read(slice).unwrap();
+
+            assert_eq!(amount_read, size as usize);
+
+            ptr = buffer;
+
+            // We need to manually handle the IO swap mechanism here. The game will "correct" the IO swaps on the next file but either
+            // I'm misunderstanding something (likely) or that codepath is actually bugged for what it's supposed to do. So instead
+            // we will manually correct the IO swaps here.
+            handle_inflate_io_swaps(ctx);
+        }
+
+        // Register x28 is the flags for the FileData that we are loading. Setting these to 0x0 will activate the codepath
+        // that enters our skip_load_hook(_2) hooks.
+        //
+        // For compressed files this will be 0x3, for uncompressed files it will be 0x0. Technically 0x2 is also supported but
+        // literally zero files in the game have that flag, not that it would impact what we are doing here
+        ctx.registers[28].set_x(0x0);
+        DID_LOAD.store(true, Ordering::Relaxed);
     } else {
-        // log??
         ptr = unsafe { jemalloc(ctx.registers[0].x(), ctx.registers[1].x()) };
     }
 
@@ -469,7 +488,29 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
         panic!("Invalid file info index provided to ResLoadingThread");
     };
 
-    let path = info.file_path().path_and_entity.hash40();
+    let path = match info.try_file_path() {
+        TryFilePathResult::FilePath(path) => path,
+
+        // If the path is reshared then we do an early exit, because we need to let the game
+        // load it properly.
+        //
+        // We do file resharing in this way so that we can maintain information in the logs/within stratus
+        // about which files were reshared and to what base path, but those files were replaced and
+        // we don't want to load their file data for a file that was unchaged.
+        //
+        // TODO: Explain this better it's midnight and I'm eepy
+        TryFilePathResult::Reshared(_path) => {
+            // See bottom of function for output variables/registers
+            ctx.registers[2].set_x(ctx.registers[21].x());
+
+            // SAFETY: See above on static mut variables
+            ctx.registers[3].set_x(unsafe { OFFSET_ABSOLUTE_ADDRESS });
+            return;
+        }
+        TryFilePathResult::Missing => panic!("File info is missing file path"),
+    };
+
+    let path = path.path_and_entity.hash40();
 
     // SAFETY: Referencing BUFFER here is safe since this is an inline hook only ever called from within
     // ResLoadingThread. It effectively becomes a function local variable
@@ -580,8 +621,8 @@ fn patch_res_threads() {
     // skip_load_hook_2
     Patch::in_text(0x3544758).data(0xB5001583u32).unwrap(); // cbnz x3, #0x2b0 (replacing ldr x2, [sp, #0x28])
 
-    // process_single_patched_file_request
-    Patch::in_text(0x3542f64).data(0xD61F0060u32).unwrap(); // br x3 (replacing mov x2, x21)
+    // // process_single_patched_file_request
+    // Patch::in_text(0x3542f64).data(0xD61F0060u32).unwrap(); // br x3 (replacing mov x2, x21)
 
     Patch::in_text(0x3750c2c).nop().unwrap();
 }
@@ -614,7 +655,85 @@ pub fn main() {
             package_index: u32,
         }
 
+        #[derive(Default)]
+        struct ReshareFileInfo {
+            dependents: Vec<u32>,
+            self_dependent: Option<u32>,
+        }
+
+        let package = archive.lookup_file_package("fighter/peach/c00").unwrap();
+        let group = package.file_group().unwrap();
+        let index_range = group.file_info_slice().range();
+
+        // for index in index_range {
+        //     let mut info = archive.get_file_info_mut(index).unwrap();
+        //     let file_path = info.path_ref().clone();
+        //     let new_fp_idx = info.archive_mut().insert_file_path(FilePath::from_parts(
+        //         file_path.path().const_with(".reshared"),
+        //         file_path.parent(),
+        //         file_path.file_name(),
+        //         file_path.extension(),
+        //         file_path.path_and_entity.data(),
+        //     ));
+        //     info.set_path(new_fp_idx);
+        //     info.desc_mut()
+        //         .set_load_method(FileLoadMethod::PackageSkip(index));
+        // }
+        let package = archive.lookup_file_package("fighter/peach/c00").unwrap();
+
+        for (idx, file) in package.infos().iter().enumerate() {
+            let shared_info = file.entity().info();
+            assert_eq!(
+                shared_info.file_path().entity().info().index(),
+                shared_info.index()
+            );
+            assert_eq!(shared_info.entity().index(), file.entity().index());
+
+            if shared_info.index() != file.index() {
+                println!(
+                    "Shared {} <-> {}",
+                    file.file_path().path().display(),
+                    shared_info.file_path().path().display()
+                );
+                println!(
+                    "\tDesc IDX: {:#x} <-> {:#x}",
+                    file.desc().index(),
+                    shared_info.desc().index()
+                );
+
+                let path =
+                    if let FileLoadMethod::PackageSkip(idx) = shared_info.desc().load_method() {
+                        Some(archive.get_file_info(idx).unwrap().file_path())
+                    } else {
+                        None
+                    };
+
+                println!(
+                    "\tLoad Method: {:x?} <-> {:x?} ({:?})",
+                    file.desc().load_method(),
+                    shared_info.desc().load_method(),
+                    path.map(|path| path.path().display())
+                );
+            }
+            // print!(
+            //     "{:#08x}: {}",
+            //     file.index(),
+            //     file.file_path().path().display()
+            // );
+            // let mut info = file;
+            // let mut next_info = info.entity().info();
+            // while info.index() != next_info.index() {
+            //     print!(" -> {}", next_info.file_path().path().display());
+            //     info = next_info;
+            //     next_info = info.entity().info();
+            // }
+            // println!();
+        }
+
+        // panic!();
+
         let mut unshare_cache = Hash40Map::default();
+        let mut reverse_unshare_cache: HashMap<u32, ReshareFileInfo> = HashMap::default();
         for package_idx in 0..archive.num_file_package() {
             let package = archive.get_file_package(package_idx as u32).unwrap();
             let infos = package.infos();
@@ -622,6 +741,14 @@ pub fn main() {
                 let info = infos.get_local(idx).unwrap();
                 let shared_info = info.entity().info();
                 if info.index() != shared_info.index() {
+                    let entry = reverse_unshare_cache
+                        .entry(shared_info.index())
+                        .or_default();
+                    entry.dependents.push(info.index());
+                    if info.file_path().index() == shared_info.file_path().index() {
+                        entry.self_dependent = Some(info.index());
+                        continue;
+                    }
                     let mut group_offset = 0;
                     for prev_idx in (0..idx).rev().skip(1) {
                         let prev_info = infos.get_local(prev_idx).unwrap();
@@ -650,79 +777,227 @@ pub fn main() {
             }
         }
 
-        for (path, file) in ReadOnlyFileSystem::file_system().files() {
-            if let Some(path) = archive.lookup_file_path_mut(*path) {
-                let path_hash = path.path_and_entity.hash40();
-                // println!("Patching {}", path.path_and_entity.hash40().display());
+        // for (path, file) in ReadOnlyFileSystem::file_system().files() {
+        //     if let Some(path) = archive.lookup_file_path_mut(*path) {
+        //         let path_hash = path.path_and_entity.hash40();
 
-                if let Some(unshare_info) = unshare_cache.get(&path_hash) {
-                    let mut info = path
-                        .into_archive_mut()
-                        .get_file_info_mut(unshare_info.real_info_index)
-                        .unwrap();
-                    println!(
-                        "Unsharing {} from {}: ({:?} | {:?})",
-                        info.path_ref().path_and_entity.hash40().display(),
-                        info.path_ref()
-                            .entity()
-                            .info()
-                            .file_path()
-                            .path_and_entity
-                            .hash40()
-                            .display(),
-                        info.flags(),
-                        info.desc_ref().load_method()
-                    );
-                    let new_data_idx =
-                        info.archive_mut()
-                            .push_file_data(FileData::new_for_unsharing(
-                                file.size(),
-                                unshare_info.group_offset,
-                            ));
+        //         if let Some(unshare_info) = unshare_cache.get(&path_hash) {
+        //             let mut info = path
+        //                 .into_archive_mut()
+        //                 .get_file_info_mut(unshare_info.real_info_index)
+        //                 .unwrap();
+        //             println!(
+        //                 "Unsharing {} from {}: ({:?} | {:?})",
+        //                 info.path_ref().path_and_entity.hash40().display(),
+        //                 info.path_ref()
+        //                     .entity()
+        //                     .info()
+        //                     .try_file_path()
+        //                     .unwrap()
+        //                     .path_and_entity
+        //                     .hash40()
+        //                     .display(),
+        //                 info.flags(),
+        //                 info.desc_ref().load_method()
+        //             );
+        //             let new_data_idx =
+        //                 info.archive_mut()
+        //                     .push_file_data(FileData::new_for_unsharing(
+        //                         file.size(),
+        //                         unshare_info.group_offset,
+        //                     ));
 
-                    let data_group_idx = info
-                        .archive()
-                        .get_file_package(unshare_info.package_index)
-                        .unwrap()
-                        .data_group()
-                        .index();
+        //             let data_group_idx = info
+        //                 .archive()
+        //                 .get_file_package(unshare_info.package_index)
+        //                 .unwrap()
+        //                 .data_group()
+        //                 .index();
 
-                    let mut desc = info.desc_ref().clone();
-                    desc.set_data(new_data_idx);
-                    desc.set_group(data_group_idx);
-                    desc.set_load_method(FileLoadMethod::Owned(0));
-                    let new_desc_idx = info.archive_mut().push_file_desc(desc);
-                    let new_entity_idx = info.archive_mut().push_file_entity(FileEntity::new(
-                        unshare_info.package_index,
-                        unshare_info.real_info_index,
-                    ));
-                    info.flags().set(FileInfoFlags::IS_SHARED, false);
-                    info.flags().set(FileInfoFlags::IS_UNKNOWN_FLAG, false);
-                    info.set_entity(new_entity_idx);
-                    info.set_desc(new_desc_idx);
-                    info.path_mut().set_entity(new_entity_idx);
-                } else {
-                    let info = path.entity_mut().info_mut();
-                    let mut data = info.desc_mut().data_mut();
+        //             let mut desc = info.desc_ref().clone();
+        //             desc.set_data(new_data_idx);
+        //             desc.set_group(data_group_idx);
+        //             desc.set_load_method(FileLoadMethod::Owned(0));
+        //             let new_desc_idx = info.archive_mut().push_file_desc(desc);
+        //             let new_entity_idx = info.archive_mut().push_file_entity(FileEntity::new(
+        //                 unshare_info.package_index,
+        //                 unshare_info.real_info_index,
+        //             ));
+        //             info.flags().set(FileInfoFlags::IS_SHARED, false);
+        //             info.flags().set(FileInfoFlags::IS_UNKNOWN_FLAG, false);
+        //             info.set_entity(new_entity_idx);
+        //             info.set_desc(new_desc_idx);
+        //             info.path_mut().set_entity(new_entity_idx);
+        //         } else {
+        //             let mut info_mut = path.entity_mut().info_mut();
 
-                    data.patch(file.size());
-                }
-            }
-        }
+        //             if let Some(reshare_info) = reverse_unshare_cache.remove(&info_mut.index()) {
+        //                 assert_eq!(info_mut.index(), info_mut.entity_ref().info().index());
+        //                 if let Some(info_idx_to_unshare) = reshare_info.self_dependent {
+        //                     // If we active this code path, it means that the file we are wanting to reshare to belongs to a file group
+        //                     // instead of a file package
+        //                     // This means a couple of things:
+        //                     // 1. It gets loaded by multiple file packages.
+        //                     // 2. The file info that we receive in ResLoadingThread and ResInflateThread will point to the shared file's
+        //                     //      name.
+        //                     //      - This means that if we load fighter/peach/c00, then some files from fighter/peach/c03 will always load
+        //                     //        and the resource threads will have no way of recognizing these files as anything except c03, whereas
+        //                     //        with non-FileGroup paths we have ways to recognize them as c00
+        //                     // 3. We don't have to make a new FileInfo!
+        //                     //
+        //                     // To alleviate this, we are first going to modify the path index of the FileGroup's FIleInfo to be reshared,
+        //                     // then we are going to create a new FileEntity and point it at that file info, then we are going to point
+        //                     // all of the yet-to-be-unshared FileInfos at that file entity. Then, lastly, we are going to unshare the package
+        //                     // file info from the group file info
+        //                     println!("BEFORE =======");
+        //                     println!("Path: {:x?}", info_mut.path_ref());
+        //                     println!("Entity: {:x?}", info_mut.path_ref().entity());
+        //                     println!("Info: {:x?}", info_mut);
+        //                     println!("Desc: {:x?}", info_mut.desc_ref());
+        //                     println!("Data: {:x?}", info_mut.desc_ref().data());
+
+        //                     info_mut.set_path_as_reshared();
+        //                     let prev_entity_idx = info_mut.entity_ref().index();
+        //                     let data_group_idx = info_mut.desc_ref().group_idx();
+        //                     let entity = info_mut.entity_ref().clone();
+        //                     let new_entity_idx = info_mut.archive_mut().push_file_entity(entity);
+        //                     info_mut.set_entity(new_entity_idx);
+        //                     let path = info_mut.path_ref().clone();
+
+        //                     let new_path = FilePath::from_parts(
+        //                         path.path_and_entity.hash40().const_with(".reshared"),
+        //                         path.parent(),
+        //                         path.file_name(),
+        //                         path.extension(),
+        //                         new_entity_idx,
+        //                     );
+
+        //                     let new_file_path_idx =
+        //                         info_mut.archive_mut().insert_file_path(new_path);
+        //                     info_mut.set_path(new_file_path_idx);
+
+        //                     println!("AFTER ===========");
+        //                     println!("Path: {:x?}", new_path);
+        //                     println!("Entity: {:x?}", entity);
+        //                     println!("Info: {:x?}", &*info_mut);
+        //                     println!("Desc: {:x?}", &*info_mut.desc_ref());
+        //                     println!("Data: {:x?}", &*info_mut.desc_ref().data());
+
+        //                     let archive = info_mut.archive_mut();
+
+        //                     for file in reshare_info.dependents.iter().copied() {
+        //                         let mut dependent_info = archive.get_file_info_mut(file).unwrap();
+        //                         // The file is no longer shared, we don't have to do anything
+        //                         if dependent_info.entity_ref().index() != prev_entity_idx {
+        //                             continue;
+        //                         }
+        //                         println!(
+        //                             "Reversing group-shared requirement for {}",
+        //                             dependent_info.path_ref().path_and_entity.hash40().display()
+        //                         );
+
+        //                         dependent_info.path_mut().set_entity(new_entity_idx);
+        //                         dependent_info.set_entity(new_entity_idx);
+        //                         let mut dependent_desc = dependent_info.desc_mut();
+        //                         dependent_desc
+        //                             .set_load_method(FileLoadMethod::Unowned(new_entity_idx));
+        //                     }
+
+        //                     {
+        //                         let mut info = info_mut
+        //                             .into_archive_mut()
+        //                             .get_file_info_mut(info_idx_to_unshare)
+        //                             .unwrap();
+        //                         println!(
+        //                             "Unsharing {} from {}: ({:?} | {:?})",
+        //                             info.path_ref().path_and_entity.hash40().display(),
+        //                             info.path_ref()
+        //                                 .entity()
+        //                                 .info()
+        //                                 .try_file_path()
+        //                                 .unwrap()
+        //                                 .path_and_entity
+        //                                 .hash40()
+        //                                 .display(),
+        //                             info.flags(),
+        //                             info.desc_ref().load_method()
+        //                         );
+        //                         let new_data_idx = info
+        //                             .archive_mut()
+        //                             .push_file_data(FileData::new_for_unsharing(file.size(), 0));
+
+        //                         let mut desc = info.desc_ref().clone();
+        //                         desc.set_data(new_data_idx);
+        //                         desc.set_group(data_group_idx);
+        //                         desc.set_load_method(FileLoadMethod::Owned(0));
+        //                         let new_desc_idx = info.archive_mut().push_file_desc(desc);
+        //                         let new_entity_idx = info.archive_mut().push_file_entity(
+        //                             FileEntity::new(data_group_idx, info_idx_to_unshare),
+        //                         );
+
+        //                         info.flags().set(FileInfoFlags::IS_SHARED, false);
+        //                         info.flags().set(FileInfoFlags::IS_UNKNOWN_FLAG, false);
+        //                         info.set_entity(new_entity_idx);
+        //                         info.set_desc(new_desc_idx);
+        //                         info.path_mut().set_entity(new_entity_idx);
+        //                         continue;
+        //                     }
+        //                 } else {
+        //                     let mut info = info_mut.clone();
+        //                     let mut desc = info_mut.desc_ref().clone();
+        //                     let data = info_mut.desc_ref().data().clone();
+        //                     let entity_index = info_mut.entity_ref().index();
+        //                     let group_idx = info_mut.entity_ref().package_or_group();
+        //                     let archive = info_mut.archive_mut();
+        //                     let new_data_idx = archive.push_file_data(data);
+        //                     desc.set_data(new_data_idx);
+        //                     let new_desc_idx = archive.push_file_desc(desc);
+        //                     info.set_desc(new_desc_idx);
+        //                     info.set_entity(archive.num_file_entity() as u32);
+        //                     info.set_path_as_reshared();
+        //                     let new_info_idx = archive.push_file_info(info);
+        //                     let entity = FileEntity::new(group_idx, new_info_idx);
+        //                     let new_entity_idx = archive.push_file_entity(entity);
+
+        //                     for file in reshare_info.dependents.iter().copied() {
+        //                         let mut dependent_info = archive.get_file_info_mut(file).unwrap();
+        //                         // The file is no longer shared, we don't have to do anything
+        //                         if dependent_info.entity_ref().index() != entity_index {
+        //                             continue;
+        //                         }
+        //                         println!(
+        //                             "Reversing shared requirement for {}",
+        //                             dependent_info.path_ref().path_and_entity.hash40().display()
+        //                         );
+
+        //                         dependent_info.path_mut().set_entity(new_entity_idx);
+        //                         dependent_info.set_entity(new_entity_idx);
+        //                         let mut dependent_desc = dependent_info.desc_mut();
+        //                         dependent_desc
+        //                             .set_load_method(FileLoadMethod::Unowned(new_entity_idx));
+        //                     }
+        //                 }
+        //             }
+
+        //             let mut data = info_mut.desc_mut().data_mut();
+
+        //             data.patch(file.size());
+        //         }
+        //     }
+        // }
 
         archive.reserialize();
 
-        println!(
-            "C01 Swing.prc: {:p}",
-            archive
-                .lookup_file_path("fighter/peach/motion/body/c01/swing.prc")
-                .unwrap()
-                .entity()
-                .info()
-                .desc()
-                .data()
-                .ptr()
-        );
+        // println!(
+        //     "C03 alp_peach_001_nor.nutexb: {:p}",
+        //     archive
+        //         .lookup_file_path("fighter/peach/model/body/c03/alp_peach_001_nor.nutexb.reshared")
+        //         .unwrap()
+        //         .entity()
+        //         .info()
+        //         .desc()
+        //         .ptr()
+        // );
 
         archive
             .lookup_file_path("fighter/mario/model/body/c00/model.numshb")
@@ -741,7 +1016,7 @@ pub fn main() {
         jemalloc_hook,
         skip_load_hook,
         skip_load_hook_p2,
-        process_single_patched_file_request,
-        loading_thread_assign_patched_pointer
+        // process_single_patched_file_request,
+        // loading_thread_assign_patched_pointer
     );
 }

@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt::Debug};
+use std::{collections::BTreeMap, fmt::Debug, ops::Range};
 
 use bytemuck::{Pod, Zeroable};
 use smash_hash::Hash40;
@@ -378,6 +378,10 @@ impl<'a, T> TableSliceRef<'a, T> {
             start,
             count,
         })
+    }
+
+    pub fn range(&self) -> Range<u32> {
+        self.start..self.start + self.count
     }
 
     pub fn len(&self) -> u32 {

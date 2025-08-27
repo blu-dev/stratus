@@ -269,7 +269,9 @@ impl ResourceTables {
                 )*
 
                 self.header.resource_data_size = total as u32;
+                self.header.file_path_count = self.file_path.len() as u32;
                 self.header.file_entity_count = self.file_entity.len() as u32;
+                self.header.file_package_info_count = self.file_info.len() as u32 - self.header.versioned_file_info_count - self.header.file_group_info_count;
                 self.header.file_package_desc_count = self.file_desc.len() as u32 - self.header.versioned_file_desc_count - self.header.file_group_info_count;
                 self.header.file_package_data_count = self.file_data.len()  as u32 - self.header.versioned_file_data_count - self.header.file_group_info_count;
                 unsafe { *new_buffer.cast::<ResourceTableHeader>() = self.header; }
@@ -452,6 +454,14 @@ impl Archive {
         stream_path => StreamPath,
         stream_entity => StreamEntity,
         stream_data => StreamData
+    }
+
+    pub fn insert_file_path(&mut self, path: FilePath) -> u32 {
+        let path_idx = self.push_file_path(path);
+        self.resource
+            .file_path_lookup
+            .insert(path.path_and_entity.hash40(), path_idx);
+        path_idx
     }
 
     pub fn dump(&self, path: impl AsRef<Utf8Path>) {
