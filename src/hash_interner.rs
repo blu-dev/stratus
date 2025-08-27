@@ -30,15 +30,21 @@ impl u24 {
         #[cfg(target_endian = "big")]
         {
             let [a, b, c, d] = n.to_be_bytes();
-            debug_assert!(a == 0);
+            assert!(a == 0);
             Self([b, c, d])
         }
         #[cfg(target_endian = "little")]
         {
             let [a, b, c, d] = n.to_le_bytes();
-            debug_assert!(d == 0);
+            assert!(d == 0);
             Self([a, b, c])
         }
+    }
+}
+
+impl Debug for u24 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        <u32 as Debug>::fmt(&&self.to_u32(), f)
     }
 }
 
@@ -50,6 +56,7 @@ const HASH_MEMORY_SLAB_SIZE: usize = 3 * 1024 * 1024; // 4 MB
 const STRING_MEMORY_SLAB_SIZE: usize = 100_000;
 
 // size_of::<(ShiftedHash, SmolRange)> * HASH_BUCKET_COUNT * HASH_BUCKET_SIZE ~= 6 MB
+// HASH_BUCKET_COUNT CANNOT CHANGE
 const HASH_BUCKET_COUNT: usize = 0x100;
 const HASH_BUCKET_SIZE: usize = 0xC00;
 
@@ -125,7 +132,6 @@ pub struct HashLookupKey {
 pub struct InternerCache {
     component_index: Hash40Map<u24>,
     cached_paths: Hash40Map<u24>,
-    fix_hash_indices: Vec<(u24, Hash40)>,
     previous_bucket_lengths: Vec<usize>,
 }
 
@@ -134,7 +140,6 @@ impl InternerCache {
         Self {
             component_index: Hash40Map::default(),
             cached_paths: Hash40Map::default(),
-            fix_hash_indices: vec![],
             previous_bucket_lengths: vec![],
         }
     }
@@ -376,7 +381,7 @@ impl HashMemorySlab {
                 let shifted_hash = (hash.raw() >> 8) as u32;
 
                 match bucket.binary_search_by(|a| a.shifted_hash.cmp(&shifted_hash)) {
-                    Ok(idx) => Some(u24::from_u32(idx as u32)),
+                    Ok(idx) => Some(u24::from_u32(start_idx as u32 + idx as u32)),
                     Err(_) => None,
                 }
             } else {
@@ -403,13 +408,10 @@ impl HashMemorySlab {
 
             let parent_hash = Hash40::const_new(current.as_str());
             if let Some(cached) = Self::try_cache_or_finalized_self(self, cache, parent_hash) {
-                debug_assert_eq!(cached.to_u32() & IS_INTERNED_COMPONENT, 0x0);
+                assert_eq!(cached.to_u32() & IS_INTERNED_COMPONENT, 0x0);
                 unsafe {
                     (*self.components)[self.component_len] =
                         u24::from_u32(IS_INTERNED_COMPONENT | cached.to_u32());
-                    cache
-                        .fix_hash_indices
-                        .push((u24::from_u32(self.component_len as u32), parent_hash));
                     self.component_len += 1;
                     len += 1;
                     break;
@@ -455,7 +457,7 @@ impl HashMemorySlab {
 
             let bucket_idx = parent_hash.crc32() as usize % HASH_BUCKET_COUNT;
             let bucket_len = unsafe { &mut (*self.bucket_lengths)[bucket_idx] };
-            debug_assert!((*bucket_len as usize) < HASH_BUCKET_SIZE);
+            assert!((*bucket_len as usize) < HASH_BUCKET_SIZE);
             let hash_idx = (bucket_idx * HASH_BUCKET_SIZE) + *bucket_len as usize;
             unsafe {
                 (*self.hashes)[hash_idx] = HashLookupKey {
@@ -473,6 +475,26 @@ impl HashMemorySlab {
     }
 
     pub fn finalize(&mut self, cache: InternerCache) {
+        let fix_indices = unsafe {
+            (&*self.components)[..self.component_len]
+                .iter()
+                .enumerate()
+                .filter_map(|(comp_idx, component)| {
+                    let idx = component.to_u32();
+                    if idx & IS_INTERNED_COMPONENT != 0 {
+                        let idx = (idx & !IS_INTERNED_COMPONENT) as usize;
+                        let bucket = idx / HASH_BUCKET_SIZE;
+                        let hash = Hash40::from_raw(
+                            (((*self.hashes)[idx].shifted_hash as u64) << 8) | bucket as u64,
+                        );
+                        Some((comp_idx as u32, hash))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
         for bucket_idx in 0..HASH_BUCKET_COUNT {
             let len = unsafe { (*self.bucket_lengths)[bucket_idx] as usize };
             let start_idx = bucket_idx * HASH_BUCKET_SIZE;
@@ -492,32 +514,26 @@ impl HashMemorySlab {
 
         let mut relookup: Hash40Map<u24> = Hash40Map::default();
 
-        for (index, hash) in cache.fix_hash_indices {
+        for (index, hash) in fix_indices {
             let new_index = if let Some(new_index) = relookup.get(&hash) {
                 *new_index
             } else {
                 let shifted_hash = (hash.raw() >> 8) as u32;
-                let mut found = None;
-                for bucket in 0..HASH_BUCKET_COUNT {
-                    let len = unsafe { (*self.bucket_lengths)[bucket] as usize };
-                    let start_idx = bucket * HASH_BUCKET_SIZE;
-                    unsafe {
-                        if let Ok(local_index) = (&mut (*self.hashes))[start_idx..start_idx + len]
-                            .binary_search_by_key(&shifted_hash, |a| a.shifted_hash)
-                        {
-                            found = Some(u24::from_u32((start_idx + local_index) as u32));
-                            break;
-                        }
-                    }
-                }
-
-                let index = found.unwrap();
+                // SAFETY: Within this function, we index into slices that we have properly set up in the constructor
+                let bucket_idx = hash.crc32() as usize % HASH_BUCKET_COUNT;
+                let len = unsafe { (*self.bucket_lengths)[bucket_idx] };
+                let start_idx = bucket_idx * HASH_BUCKET_SIZE;
+                let bucket = unsafe { &(&(*self.hashes))[start_idx..start_idx + len as usize] };
+                let local_idx = bucket
+                    .binary_search_by_key(&shifted_hash, |a| a.shifted_hash)
+                    .unwrap();
+                let index = u24::from_u32((start_idx + local_idx) as u32);
                 relookup.insert(hash, index);
                 index
             };
 
             unsafe {
-                (*self.components)[index.to_u32() as usize] =
+                (*self.components)[index as usize] =
                     u24::from_u32(new_index.to_u32() | IS_INTERNED_COMPONENT);
             }
         }
