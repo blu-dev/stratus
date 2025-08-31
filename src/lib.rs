@@ -1,6 +1,6 @@
 use std::{
     alloc::Layout,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::Read,
     ops::Deref,
@@ -12,16 +12,16 @@ use std::{
 };
 
 use camino::Utf8Path;
+use log::LevelFilter;
 use skyline::hooks::InlineCtx;
-use smash_hash::{Hash40, Hash40Map};
+use smash_hash::Hash40Map;
 
 use crate::{
     archive::Archive,
-    data::{
-        FileData, FileEntity, FileInfo, FileInfoFlags, FileLoadMethod, FilePath, TryFilePathResult,
-    },
+    data::{FileData, FileEntity, FileInfoFlags, FileLoadMethod, FilePath, TryFilePathResult},
     discover::FileSystem,
-    hash_interner::{DisplayHash, HashMemorySlab, InternerCache},
+    hash_interner::{DisplayHash, HashMemorySlab},
+    logger::NxKernelLogger,
 };
 
 mod archive;
@@ -29,6 +29,7 @@ mod containers;
 mod data;
 mod discover;
 mod hash_interner;
+mod logger;
 
 const STRATUS_FOLDER: &'static str = "sd:/ultimate/stratus/";
 
@@ -286,17 +287,24 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
     };
 
     let path = match info.try_file_path() {
-        TryFilePathResult::FilePath(path) => path.path_and_entity.hash40(),
+        TryFilePathResult::FilePath(path) => {
+            log::info!("[jemalloc_hook] Inflating file {}", path.path().display());
+            path.path_and_entity.hash40()
+        }
         TryFilePathResult::Reshared(path) => {
-            #[cfg(not(feature = "verbose_logging"))]
-            {
-                let _ = path;
-            }
+            log::info!(
+                "[jemalloc_hook] Inflating reshared file {}",
+                path.path().display()
+            );
+            // #[cfg(not(feature = "verbose_logging"))]
+            // {
+            //     let _ = path;
+            // }
 
-            #[cfg(feature = "verbose_logging")]
-            {
-                println!("Encountered reshared file pointing at '{}''s original data, skipping file replacement", path.path_and_entity.hash40().display());
-            }
+            // #[cfg(feature = "verbose_logging")]
+            // {
+            //     println!("Encountered reshared file pointing at '{}''s original data, skipping file replacement", path.path_and_entity.hash40().display());
+            // }
 
             let ptr = unsafe { jemalloc(ctx.registers[0].x(), ctx.registers[1].x()) };
             ctx.registers[0].set_x(ptr as u64);
@@ -327,7 +335,7 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
         ReadOnlyFileSystem::file_system().get_full_file_path(path, unsafe { &mut BUFFER })
     {
         // SAFETY: See above
-        println!("Replacing {}", unsafe { &BUFFER });
+        log::info!("[jemalloc_hook] Replacing {}", unsafe { &BUFFER });
 
         // We need to create the same alignment on our buffer the game is expecting.
         // This alignment is going to be 0x1000 (page alignment) for graphics archives (BNTX and NUTEXB)
@@ -337,6 +345,7 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
         // and don't need to repeat the file IO here. The data_ptr should get replaced the next time that the game needs to load
         // something so we don't need to worry about other file loads reading from that pointer
         if unsafe { *res_service.add(0x234).cast::<u32>() == 0x4 } {
+            log::info!("[jemalloc_hook] Taking loaded file pointer from ResLoadingThread (single file replacement)");
             ptr = unsafe { *res_service.add(0x218).cast::<*mut u8>() };
         } else {
             // SAFETY: we check the null-ness of the pointer after allocation
@@ -489,7 +498,13 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
     };
 
     let path = match info.try_file_path() {
-        TryFilePathResult::FilePath(path) => path,
+        TryFilePathResult::FilePath(path) => {
+            log::info!(
+                "[process_single_patched_file_request] Loading file {}",
+                path.path().display()
+            );
+            path
+        }
 
         // If the path is reshared then we do an early exit, because we need to let the game
         // load it properly.
@@ -499,7 +514,11 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
         // we don't want to load their file data for a file that was unchaged.
         //
         // TODO: Explain this better it's midnight and I'm eepy
-        TryFilePathResult::Reshared(_path) => {
+        TryFilePathResult::Reshared(path) => {
+            log::info!(
+                "[process_single_patched_file_request] Loading reshared file {}",
+                path.path().display()
+            );
             // See bottom of function for output variables/registers
             ctx.registers[2].set_x(ctx.registers[21].x());
 
@@ -517,6 +536,10 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
     if let Some(size) =
         ReadOnlyFileSystem::file_system().get_full_file_path(path, unsafe { &mut BUFFER })
     {
+        log::info!(
+            "[process_single_patched_file_request] Replacing file {}",
+            path.display()
+        );
         // We know that we are loading a file as a single file request, let's make use of our file IO thread to load
         // this instead of trying to read anything from the data.arc
         // For now we are still going to pass it over to the ResInflateThread. ResLoadingThread will configure the load method
@@ -595,7 +618,7 @@ fn loading_thread_assign_patched_pointer(ctx: &mut InlineCtx) {
     // SAFETY: We are only accessing this static mut inside of the ResLoadingThread, so it's not worth the overhead
     // of a mutex lock here
     if let Some(pointer) = unsafe { LOADING_THREAD_PATCHED_POINTER.take() } {
-        println!("Setting pointer {pointer:#p}");
+        log::info!("[loading_thread_assigned_patch_pointer] Setting patched file pointer");
         ctx.registers[8].set_x(pointer as u64);
     }
 }
@@ -640,6 +663,9 @@ pub fn main() {
     init_folder();
     init_hashes();
     patch_res_threads();
+    logger::install_hooks();
+    let _ = log::set_logger(Box::leak(Box::new(NxKernelLogger::new())));
+    unsafe { log::set_max_level_racy(LevelFilter::Info) };
 
     ARCHIVE.get_or_init(|| {
         unsafe {
@@ -662,31 +688,43 @@ pub fn main() {
 
         let mut unshare_cache = Hash40Map::default();
         let mut reverse_unshare_cache: HashMap<u32, ReshareFileInfo> = HashMap::default();
-        let mut rename_cache = Vec::new();
+        let mut rename_cache = HashSet::new();
 
         for package_idx in 0..archive.num_file_package() {
             let package = archive.get_file_package(package_idx as u32).unwrap();
             let infos = package.infos();
             for idx in 0..infos.len() {
                 let info = infos.get_local(idx).unwrap();
-                let mut shared_info = info.entity().info();
-
-                let mut share_depth = 1;
-
-                while shared_info.index() != shared_info.entity().info().index() {
-                    share_depth += 1;
-                    shared_info = shared_info.entity().info();
-                }
+                let shared_info = info.entity().info();
 
                 if info.index() != shared_info.index() {
-                    assert!(share_depth == 1);
                     let entry = reverse_unshare_cache
                         .entry(shared_info.index())
                         .or_default();
-                    entry.dependents.push(info.index());
+
+                    // Some files are shared to themselves! This is because of 1 of 2 situations:
+                    // 1. The file is included in multiple different file packages. This is the case for some PRC
+                    //      files and possibly some other files (I think Corrin has one?) (less common case). In these
+                    //      cases we don't need to do anything to said file, because the original data is still going to be
+                    //      expected to be loaded as a single file request (it's original data is in a file package, not a group)
+                    // 2. The file is shared across file package and file groups. This is the case for lots of files like
+                    //      models and textures. In these cases, we need to do some manipulation. For our use cases we call this "renaming" the file,
+                    //      which will add a new FilePath entry and allow unsharing to work like normal. We have to do this because the
+                    //      OG file data is a part of a file group and will be loaded regardless, we cannot replace it effectively.
+                    //
+                    // To figure out which one of these it is, we look at the file descriptor's load method. The correct way would be
+                    // to check if the index of the file info is >= the index of the first FileGroup's FileInfo. Perhaps at a later
+                    // date we will do it that way
                     if info.file_path().index() == shared_info.file_path().index() {
-                        rename_cache.push(shared_info.index());
+                        if shared_info.desc().load_method().is_skip() {
+                            rename_cache.insert(shared_info.index());
+                        } else {
+                            // Skip unsharing since this file should continue to be shared to itself
+                            continue;
+                        }
                     }
+                    entry.dependents.push(info.index());
+
                     let mut group_offset = 0;
                     for prev_idx in (0..idx).rev().skip(1) {
                         let prev_info = infos.get_local(prev_idx).unwrap();
@@ -716,6 +754,7 @@ pub fn main() {
         }
 
         for file in rename_cache {
+            // let original_info = archive.get_file_info(original).unwrap().file_path().path();
             let mut info = archive.get_file_info_mut(file).unwrap();
             let file_path = info.path_ref().clone();
             let new_fp_idx = info.archive_mut().insert_file_path(FilePath::from_parts(
@@ -725,7 +764,14 @@ pub fn main() {
                 file_path.extension(),
                 file_path.path_and_entity.data(),
             ));
+
+            log::info!(
+                "Processing {} ({:#x?})",
+                file_path.path().display(),
+                info.desc_ref().load_method() // original_info.display()
+            );
             info.set_path(new_fp_idx);
+            info.set_path_as_reshared();
             info.desc_mut()
                 .set_load_method(FileLoadMethod::PackageSkip(file));
         }
@@ -828,10 +874,6 @@ pub fn main() {
         }
 
         archive.reserialize();
-
-        archive
-            .lookup_file_path("fighter/mario/model/body/c00/model.numshb")
-            .unwrap();
 
         ReadOnlyArchive(archive)
     });

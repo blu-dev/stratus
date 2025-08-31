@@ -410,6 +410,10 @@ macro_rules! decl_access {
     ($($name:ident => $t:ty),*) => {
         paste::paste! {
             $(
+                pub fn [<iter_ $name>](&self) -> impl Iterator<Item = TableRef<'_, $t>> {
+                    self.resource.$name.iter().filter_map(|(index, _)| TableRef::new(self, &self.resource.$name, index))
+                }
+
                 pub fn [<num_ $name>](&self) -> usize {
                     self.resource.$name.len()
                 }

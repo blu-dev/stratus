@@ -50,6 +50,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ece4a9a361bf75974e2c18b719e8fd501e4e336d7a5db22d077c4f2367a94be9"
 
 [[package]]
+name = "log"
+version = "0.4.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
+
+[[package]]
 name = "nnsdk"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -115,6 +121,7 @@ dependencies = [
  "bitflags",
  "bytemuck",
  "camino",
+ "log",
  "paste",
  "skyline",
  "smash-hash",

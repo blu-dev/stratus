@@ -223,9 +223,6 @@ impl FileData {
     }
 
     pub fn patch(&mut self, new_size: u32) {
-        // if !self.flags.contains(FileFlags::IS_COMPRESSED) {
-        //     self.compressed_size = new_size;
-        // }
         self.decompressed_size = new_size;
     }
 }
@@ -364,9 +361,7 @@ impl FileInfo {
 
     pub fn set_path_as_reshared(&mut self) {
         assert!(!self.flags.intersects(FileInfoFlags::IS_RESHARED));
-        // assert_eq!(self.path & Self::RESHARED_FILE_PATH_BIT, 0x00);
         self.flags |= FileInfoFlags::IS_RESHARED;
-        // self.path |= Self::RESHARED_FILE_PATH_BIT;
     }
 
     pub fn set_path(&mut self, path: u32) {
@@ -399,15 +394,11 @@ impl<'a> TryFilePathResult<'a> {
 
 impl<'a> TableRef<'a, FileInfo> {
     pub fn try_file_path(&self) -> TryFilePathResult<'a> {
-        let Some(path) = self
-            .archive()
-            .get_file_path(self.path /* & !FileInfo::RESHARED_FILE_PATH_BIT*/)
-        else {
+        let Some(path) = self.archive().get_file_path(self.path) else {
             return TryFilePathResult::Missing;
         };
 
         if self.flags.intersects(FileInfoFlags::IS_RESHARED) {
-            // if self.path & FileInfo::RESHARED_FILE_PATH_BIT != 0 {
             TryFilePathResult::Reshared(path)
         } else {
             TryFilePathResult::FilePath(path)
