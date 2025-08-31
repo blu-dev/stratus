@@ -688,7 +688,7 @@ pub fn main() {
 
         let mut unshare_cache = Hash40Map::default();
         let mut reverse_unshare_cache: HashMap<u32, ReshareFileInfo> = HashMap::default();
-        let mut rename_cache = HashSet::new();
+        let mut rename_cache = Vec::new();
 
         for package_idx in 0..archive.num_file_package() {
             let package = archive.get_file_package(package_idx as u32).unwrap();
@@ -716,12 +716,12 @@ pub fn main() {
                     // to check if the index of the file info is >= the index of the first FileGroup's FileInfo. Perhaps at a later
                     // date we will do it that way
                     if info.file_path().index() == shared_info.file_path().index() {
-                        if shared_info.desc().load_method().is_skip() {
-                            rename_cache.insert(shared_info.index());
-                        } else {
-                            // Skip unsharing since this file should continue to be shared to itself
-                            continue;
-                        }
+                        // if shared_info.desc().load_method().is_skip() {
+                        rename_cache.push(shared_info.index());
+                        // } else {
+                        // Skip unsharing since this file should continue to be shared to itself
+                        // continue;
+                        // }
                     }
                     entry.dependents.push(info.index());
 
@@ -771,9 +771,9 @@ pub fn main() {
                 info.desc_ref().load_method() // original_info.display()
             );
             info.set_path(new_fp_idx);
-            info.set_path_as_reshared();
-            info.desc_mut()
-                .set_load_method(FileLoadMethod::PackageSkip(file));
+            // info.set_path_as_reshared();
+            // info.desc_mut()
+            //     .set_load_method(FileLoadMethod::PackageSkip(file));
         }
 
         for (path, file) in ReadOnlyFileSystem::file_system().files() {
