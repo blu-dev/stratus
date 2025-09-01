@@ -291,7 +291,7 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
 
     let path = match info.try_file_path() {
         TryFilePathResult::FilePath(path) => {
-            // log::info!("[jemalloc_hook] Inflating file {}", path.path().display());
+            log::info!("[jemalloc_hook] Inflating file {}", path.path().display());
             path.path_and_entity.hash40()
         }
         TryFilePathResult::Reshared(path) => {
@@ -366,11 +366,13 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
             // SAFETY: we assert that the slice is non-null, it's also allocated to the correct length and alignment above
             let slice = unsafe { std::slice::from_raw_parts_mut(buffer, size as usize) };
 
-            // SAFETY: See above
-            let mut file = std::fs::File::open(unsafe { &BUFFER }).unwrap();
-            let amount_read = file.read(slice).unwrap();
+            ReadOnlyFileSystem::file_system().load_into_buffer(path, unsafe { &BUFFER }, slice);
 
-            assert_eq!(amount_read, size as usize);
+            // // SAFETY: See above
+            // let mut file = std::fs::File::open(unsafe { &BUFFER }).unwrap();
+            // let amount_read = file.read(slice).unwrap();
+
+            // assert_eq!(amount_read, size as usize);
 
             ptr = buffer;
 
@@ -502,10 +504,10 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
 
     let path = match info.try_file_path() {
         TryFilePathResult::FilePath(path) => {
-            // log::info!(
-            //     "[process_single_patched_file_request] Loading file {}",
-            //     path.path().display()
-            // );
+            log::info!(
+                "[process_single_patched_file_request] Loading file {}",
+                path.path().display()
+            );
             path
         }
 
@@ -580,12 +582,14 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
         // SAFETY: We assert on the alignment of the slice, the length we just have to trust the allocator
         let slice = unsafe { std::slice::from_raw_parts_mut(buffer, size as usize) };
 
-        // SAFETY: See above
-        let mut file = std::fs::File::open(unsafe { &BUFFER }).unwrap();
-        let amount_read = file.read(slice).unwrap();
+        ReadOnlyFileSystem::file_system().load_into_buffer(path, unsafe { &BUFFER }, slice);
 
-        // TODO: Should this be sanity?
-        assert_eq!(amount_read, size as usize);
+        // SAFETY: See above
+        // let mut file = std::fs::File::open(unsafe { &BUFFER }).unwrap();
+        // let amount_read = file.read(slice).unwrap();
+
+        // // TODO: Should this be sanity?
+        // assert_eq!(amount_read, size as usize);
 
         // OUT VARIABLES:
         // - x0 is supposed to be the return value of the vanilla read function.
@@ -672,23 +676,44 @@ extern "C" {
 
 #[skyline::main(name = "stratus")]
 pub fn main() {
+    // logger::install_hooks();
+
+    std::panic::set_hook(Box::new(|info| {
+        let location = info.location().unwrap();
+
+        let msg = match info.payload().downcast_ref::<&'static str>() {
+            Some(s) => *s,
+            None => match info.payload().downcast_ref::<String>() {
+                Some(s) => &s[..],
+                None => "Box<Any>",
+            },
+        };
+
+        let err_msg = format!("smashline has panicked: '{}', {}", msg, location);
+        skyline::error::show_error(
+                        69,
+                        "Smashline has panicked! Please open Details and post an issue at https://github.com/HDR-Development/smashline.",
+                        err_msg.as_str(),
+                    );
+    }));
+    let now = std::time::Instant::now();
+
+    unsafe {
+        set_overclock_enabled(true);
+        set_cpu_boost_mode(1);
+    }
     init_folder();
     init_hashes();
     patch_res_threads();
-    logger::install_hooks();
     let _ = log::set_logger(Box::leak(Box::new(NxKernelLogger::new())));
     unsafe { log::set_max_level_racy(LevelFilter::Info) };
 
     ARCHIVE.get_or_init(|| {
-        unsafe {
-            set_overclock_enabled(true);
-            set_cpu_boost_mode(1);
-        }
         let mut file = File::open("rom:/data.arc").unwrap();
         let mut archive = archive::Archive::read(&mut file);
 
         struct UnsharedFileInfo {
-            real_info_index: u32,
+            real_infos: Vec<u32>,
             group_offset: u32,
             package_index: u32,
         }
@@ -707,11 +732,11 @@ pub fn main() {
             if let Some(group) = package.file_group() {
                 for info in group.file_info_slice() {
                     if info.entity().info().index() != info.index() {
-                        log::info!(
-                            "Secondary Unshare: {} ({:#x})",
-                            info.file_path().path().display(),
-                            info.index()
-                        );
+                        // log::info!(
+                        //     "Secondary Unshare: {} ({:#x})",
+                        //     info.file_path().path().display(),
+                        //     info.index()
+                        // );
 
                         unshare_secondary_cache
                             .entry(info.file_path().index())
@@ -773,14 +798,15 @@ pub fn main() {
                     }
 
                     group_offset = (group_offset + 0xf) & 0x10;
-                    unshare_cache.insert(
-                        info.file_path().path_and_entity.hash40(),
-                        UnsharedFileInfo {
-                            real_info_index: info.index(),
+                    unshare_cache
+                        .entry(info.file_path().path_and_entity.hash40())
+                        .or_insert_with(|| UnsharedFileInfo {
+                            real_infos: vec![],
                             package_index: package.index(),
                             group_offset,
-                        },
-                    );
+                        })
+                        .real_infos
+                        .push(info.index());
                 }
             }
         }
@@ -796,11 +822,11 @@ pub fn main() {
                 file_path.path_and_entity.data(),
             ));
 
-            log::info!(
-                "Processing {} ({:#x?})",
-                file_path.path().display(),
-                info.desc_ref().load_method() // original_info.display()
-            );
+            // log::info!(
+            //     "Processing {} ({:#x?})",
+            //     file_path.path().display(),
+            //     info.desc_ref().load_method() // original_info.display()
+            // );
             info.set_path(new_fp_idx);
             info.set_as_reshared();
             info.desc()
@@ -812,14 +838,17 @@ pub fn main() {
                 let path_hash = path.path_and_entity.hash40();
 
                 if let Some(unshare_info) = unshare_cache.get(&path_hash) {
-                    let mut info = path
-                        .into_archive_mut()
-                        .get_file_info_mut(unshare_info.real_info_index)
-                        .unwrap();
+                    // let mut info = path
+                    //     .into_archive_mut()
+                    //     .get_file_info_mut(unshare_info.real_info_index)
+                    //     .unwrap();
                     log::info!(
-                        "Unsharing {} from {}: ({:?} | {:?})",
-                        info.path_ref().path_and_entity.hash40().display(),
-                        info.path_ref()
+                        "Unsharing {} from {}: ({:x?})",
+                        path_hash.display(),
+                        archive
+                            .get_file_info(unshare_info.real_infos[0])
+                            .unwrap()
+                            .file_path()
                             .entity()
                             .info()
                             .try_file_path()
@@ -827,43 +856,60 @@ pub fn main() {
                             .path_and_entity
                             .hash40()
                             .display(),
-                        info.flags(),
-                        info.desc_ref().load_method()
+                        unshare_info.real_infos,
                     );
-                    let new_data_idx =
-                        info.archive_mut()
-                            .push_file_data(FileData::new_for_unsharing(
-                                file.size(),
-                                unshare_info.group_offset,
-                            ));
+                    let new_data_idx = archive.push_file_data(FileData::new_for_unsharing(
+                        file.size(),
+                        unshare_info.group_offset,
+                    ));
 
-                    let data_group_idx = info
-                        .archive()
+                    let data_group_idx = archive
                         .get_file_package(unshare_info.package_index)
                         .unwrap()
                         .data_group()
                         .index();
 
-                    let mut desc = info.desc_ref().clone();
-                    desc.set_data(new_data_idx);
-                    desc.set_group(data_group_idx);
-                    desc.set_load_method(FileLoadMethod::Owned(0));
-                    let new_desc_idx = info.archive_mut().push_file_desc(desc);
-
-                    let new_entity_idx = info.archive_mut().push_file_entity(FileEntity::new(
-                        unshare_info.package_index,
-                        unshare_info.real_info_index,
+                    // let mut desc = info.desc_ref().clone();
+                    // desc.set_data(new_data_idx);
+                    // desc.set_group(data_group_idx);
+                    // desc.set_load_method(FileLoadMethod::Owned(0));
+                    let new_desc_idx = archive.push_file_desc(FileDescriptor::new(
+                        data_group_idx,
+                        new_data_idx,
+                        FileLoadMethod::Owned(0),
                     ));
-                    info.flags().set(FileInfoFlags::IS_SHARED, false);
-                    info.flags().set(FileInfoFlags::IS_UNKNOWN_FLAG, false);
-                    info.set_entity(new_entity_idx);
-                    info.set_desc(new_desc_idx);
-                    info.path_mut().set_entity(new_entity_idx);
+
+                    let new_entity_idx = archive.push_file_entity(FileEntity::new(
+                        unshare_info.package_index,
+                        unshare_info.real_infos[0],
+                    ));
+
+                    let mut first_info = archive
+                        .get_file_info_mut(unshare_info.real_infos[0])
+                        .unwrap();
+                    let flags = first_info.flags();
+                    first_info.set_flags(
+                        flags & !(FileInfoFlags::IS_SHARED | FileInfoFlags::IS_UNKNOWN_FLAG),
+                    );
+                    first_info.set_entity(new_entity_idx);
+                    first_info.set_desc(new_desc_idx);
+                    first_info.path_mut().set_entity(new_entity_idx);
+
+                    for info in unshare_info.real_infos.iter() {
+                        let archive = first_info.archive_mut();
+                        let mut info = archive.get_file_info_mut(*info).unwrap();
+                        info.set_entity(new_entity_idx);
+                        info.set_desc(new_desc_idx);
+                    }
 
                     if let Some(secondary) =
-                        unshare_secondary_cache.remove(&info.path_ref().index())
+                        unshare_secondary_cache.remove(&first_info.path_ref().index())
                     {
-                        let archive = info.into_archive_mut();
+                        println!(
+                            "Unsharing secondary {}",
+                            first_info.path_ref().path().display()
+                        );
+                        let archive = first_info.into_archive_mut();
                         for secondary in secondary {
                             let mut secondary_info = archive.get_file_info_mut(secondary).unwrap();
                             secondary_info.flags().set(FileInfoFlags::IS_SHARED, false);
@@ -956,12 +1002,6 @@ pub fn main() {
             }
 
             if let Some(package) = package {
-                println!(
-                    "Package for {} was deduced to be {}",
-                    file.filepath.path().display(),
-                    package.display()
-                );
-
                 let search_path = SearchPath::from_file_path(&file.filepath);
 
                 let new_index = archive.insert_search_path(search_path);
@@ -985,16 +1025,32 @@ pub fn main() {
                 continue;
             }
 
-            let package = archive.lookup_file_package(package_hash).unwrap();
+            let Some(package) = archive.lookup_file_package(package_hash) else {
+                continue;
+            };
+
+            let should_log = package_hash == Hash40::const_new("fighter/samus/c00");
+
             let file_info_range = package.infos().range();
+
+            if should_log {
+                println!(
+                    "Relocating package infos range {:#x} - {:#x}",
+                    file_info_range.start, file_info_range.end
+                );
+            }
 
             let data_group = package.data_group().index();
 
             let new_range_start = archive.num_file_info() as u32;
             let new_range_len = (file_info_range.end - file_info_range.start) + files.len() as u32;
             for file_info_idx in file_info_range {
-                let info = archive.get_file_info(file_info_idx).unwrap().clone();
-                archive.push_file_info(info);
+                let info = archive.get_file_info_mut(file_info_idx).unwrap().clone();
+                let new_idx = archive.push_file_info(info);
+                let mut info = archive.get_file_info_mut(new_idx).unwrap();
+                if info.path_ref().entity().info().index() == file_info_idx {
+                    info.path_mut().entity_mut().set_info(new_idx);
+                }
             }
 
             for file in files {
@@ -1036,6 +1092,8 @@ pub fn main() {
         // set_overclock_enabled(false);
         set_cpu_boost_mode(0);
     }
+
+    panic!("Booted in {}s", now.elapsed().as_secs_f32());
 
     skyline::install_hooks!(
         skip_load_resource_tables,
