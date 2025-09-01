@@ -14,12 +14,15 @@ use std::{
 use camino::Utf8Path;
 use log::LevelFilter;
 use skyline::hooks::InlineCtx;
-use smash_hash::Hash40Map;
+use smash_hash::{Hash40, Hash40Map};
 
 use crate::{
     archive::Archive,
-    data::{FileData, FileEntity, FileInfoFlags, FileLoadMethod, FilePath, TryFilePathResult},
-    discover::FileSystem,
+    data::{
+        FileData, FileDescriptor, FileEntity, FileInfo, FileInfoFlags, FileLoadMethod, FilePath,
+        IntoHash, SearchPath, TryFilePathResult,
+    },
+    discover::{FileSystem, NewFile},
     hash_interner::{DisplayHash, HashMemorySlab},
     logger::NxKernelLogger,
 };
@@ -652,7 +655,10 @@ fn patch_res_threads() {
     // process_single_patched_file_request
     Patch::in_text(0x3542f64).data(0xD61F0060u32).unwrap(); // br x3 (replacing mov x2, x21)
 
+    // skip_load_resource_tables
     Patch::in_text(0x3750c2c).nop().unwrap();
+
+    // skip_load_search_tables
     Patch::in_text(0x3750c44).nop().unwrap();
 }
 
@@ -780,7 +786,6 @@ pub fn main() {
         }
 
         for file in rename_cache {
-            // let original_info = archive.get_file_info(original).unwrap().file_path().path();
             let mut info = archive.get_file_info_mut(file).unwrap();
             let file_path = info.path_ref().clone();
             let new_fp_idx = info.archive_mut().insert_file_path(FilePath::from_parts(
@@ -914,40 +919,115 @@ pub fn main() {
             }
         }
 
-        archive.reserialize();
+        let mut new_files_by_package: Hash40Map<Vec<&NewFile>> = Hash40Map::default();
 
-        /* Scanning for shared file path
-         */
-
-        let target_entity_index = 0x25aa7;
-        for fp in archive.iter_file_path() {
-            if fp.entity().index() == target_entity_index {
-                log::info!(
-                    "File {} ({:#x}) points to entity",
-                    fp.path().display(),
-                    fp.index()
-                );
+        for file in ReadOnlyFileSystem::file_system().new_files.iter() {
+            // Just means that the user didn't have a hashes file
+            if archive.lookup_file_path(file.filepath.path()).is_some() {
+                continue;
             }
-        }
 
-        for fi in archive.iter_file_info() {
-            if fi.entity().index() == target_entity_index {
-                log::info!(
-                    "Info {} ({:#x}) points to entity",
-                    fi.file_path().path().display(),
-                    fi.index()
-                );
-            }
-        }
+            let mut package = None;
 
-        for fd in archive.iter_file_desc() {
-            match fd.load_method() {
-                FileLoadMethod::Unowned(entity) if entity == target_entity_index => {
-                    log::info!("Desc {:#x} points to entity", fd.index());
+            let components = ReadOnlyFileSystem::hashes()
+                .components_for(file.filepath.path())
+                .unwrap()
+                .collect::<Vec<_>>();
+            match components[0] {
+                "fighter" => {
+                    if let Some(fighter_name) = components.get(1) {
+                        if let Some(fighter_slot) = components.get(4) {
+                            if fighter_slot.starts_with("c") && fighter_slot.len() == 3 {
+                                package = Some(
+                                    Hash40::const_new("fighter")
+                                        .const_with("/")
+                                        .const_with(fighter_name)
+                                        .const_with("/")
+                                        .const_with(fighter_slot),
+                                );
+                            }
+                        }
+                    }
+                }
+                "stage" => {
+                    package = Some(file.filepath.parent().const_trim_trailing("/"));
                 }
                 _ => {}
             }
+
+            if let Some(package) = package {
+                println!(
+                    "Package for {} was deduced to be {}",
+                    file.filepath.path().display(),
+                    package.display()
+                );
+
+                let search_path = SearchPath::from_file_path(&file.filepath);
+
+                let new_index = archive.insert_search_path(search_path);
+
+                let parent = archive
+                    .lookup_search_folder_mut(search_path.parent())
+                    .unwrap();
+
+                let mut child = parent.first_child();
+                while !child.is_end() {
+                    child = child.next();
+                }
+
+                child.set_next_index(new_index);
+                new_files_by_package.entry(package).or_default().push(&file);
+            }
         }
+
+        for (package_hash, files) in new_files_by_package {
+            if files.is_empty() {
+                continue;
+            }
+
+            let package = archive.lookup_file_package(package_hash).unwrap();
+            let file_info_range = package.infos().range();
+
+            let data_group = package.data_group().index();
+
+            let new_range_start = archive.num_file_info() as u32;
+            let new_range_len = (file_info_range.end - file_info_range.start) + files.len() as u32;
+            for file_info_idx in file_info_range {
+                let info = archive.get_file_info(file_info_idx).unwrap().clone();
+                archive.push_file_info(info);
+            }
+
+            for file in files {
+                let new_entity_idx =
+                    archive.push_file_entity(FileEntity::new(data_group, 0xFFFFFF));
+                let mut filepath = file.filepath;
+                filepath.path_and_entity.set_data(new_entity_idx);
+                let new_file_path = archive.insert_file_path(filepath);
+                let new_data = archive.push_file_data(FileData::new_for_unsharing(file.size, 0));
+                let new_desc = archive.push_file_desc(FileDescriptor::new(
+                    data_group,
+                    new_data,
+                    FileLoadMethod::Owned(0),
+                ));
+                let new_info = archive.push_file_info(FileInfo::new(
+                    new_file_path,
+                    new_entity_idx,
+                    new_desc,
+                    FileInfoFlags::IS_GRAPHICS_ARCHIVE,
+                ));
+                archive
+                    .get_file_entity_mut(new_entity_idx)
+                    .unwrap()
+                    .set_info(new_info);
+            }
+
+            archive
+                .lookup_file_package_mut(package_hash)
+                .unwrap()
+                .set_info_range(new_range_start, new_range_len);
+        }
+
+        archive.reserialize();
 
         ReadOnlyArchive(archive)
     });

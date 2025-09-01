@@ -257,6 +257,51 @@ pub struct ResourceTables {
 }
 
 impl SearchTables {
+    pub fn reserialize_internal(&mut self) {
+        macro_rules! reserialize_order {
+            ($($id:ident,)*) => {
+                let mut total = std::mem::size_of::<SearchTableHeader>();
+                $(
+                    let $id = {
+                        let current = total;
+                        println!(concat!(stringify!($id), "[{:#x} - {:#x}]"), current, current + self.$id.byte_len());
+                        total += self.$id.byte_len();
+                        current
+                    };
+                )*
+
+                let new_buffer = unsafe {
+                    std::alloc::alloc(Layout::from_size_align(total, 0x10).unwrap())
+                };
+
+                let buffer_slice = unsafe { std::slice::from_raw_parts_mut(new_buffer, total) };
+
+                $(
+                    unsafe { self.$id.write_and_update(buffer_slice, $id); }
+                )*
+
+                self.header.search_data_size = total as u32;
+                self.header.folder_count = self.search_folder.len() as u32;
+                self.header.path_link_count = self.search_path_link.len() as u32;
+                self.header.path_count = self.search_path.len() as u32;
+
+                // self.header.stream_data_size = total as u32;
+                // self.header.file_path_count = self.file_path.len() as u32;
+                // self.header.file_entity_count = self.file_entity.len() as u32;
+                // self.header.file_package_info_count = self.file_info.len() as u32 - self.header.versioned_file_info_count - self.header.file_group_info_count;
+                // self.header.file_package_desc_count = self.file_desc.len() as u32 - self.header.versioned_file_desc_count - self.header.file_group_info_count;
+                // self.header.file_package_data_count = self.file_data.len()  as u32 - self.header.versioned_file_data_count - self.header.file_group_info_count;
+                unsafe { *new_buffer.cast::<SearchTableHeader>() = self.header; }
+
+                self.raw = unsafe { Box::from_raw(buffer_slice) };
+            }
+        }
+
+        reserialize_order! {
+            search_folder_lookup, search_folder, search_path_lookup, search_path_link, search_path,
+        }
+    }
+
     #[allow(unused_assignments)]
     pub fn from_bytes(mut bytes: Box<[u8]>) -> Self {
         let mut cursor = 0usize;
@@ -465,6 +510,30 @@ macro_rules! decl_lookup {
     }
 }
 
+macro_rules! decl_search_access {
+    ($($name:ident => $t:ty),*) => {
+        paste::paste! {
+            $(
+                pub fn [<iter_ $name>](&self) -> impl Iterator<Item = TableRef<'_, $t>> {
+                    self.search.$name.iter().filter_map(|(index, _)| TableRef::new(self, &self.search.$name, index))
+                }
+
+                pub fn [<num_ $name>](&self) -> usize {
+                    self.search.$name.len()
+                }
+
+                pub fn [<get_ $name>](&self, index: u32) -> Option<TableRef<'_, $t>> {
+                    TableRef::new(self, &self.search.$name, index)
+                }
+
+                pub fn [<get_ $name _mut>](&mut self, index: u32) -> Option<TableMut<'_, $t>> {
+                    TableMut::new(self, |archive| &mut archive.search.$name, index)
+                }
+            )*
+        }
+    }
+}
+
 macro_rules! decl_access {
     ($($name:ident => $t:ty),*) => {
         paste::paste! {
@@ -519,6 +588,73 @@ impl Archive {
         stream_data => StreamData
     }
 
+    decl_search_access! {
+        search_folder => SearchFolder,
+        search_path_link => SearchPathLink,
+        search_path => SearchPath
+    }
+
+    pub fn lookup_search_folder(&self, path: impl IntoHash) -> Option<TableRef<'_, SearchFolder>> {
+        let index = self.search.search_folder_lookup.get(path.into_hash())?;
+        TableRef::new(self, &self.search.search_folder, index)
+    }
+
+    pub fn lookup_search_folder_mut(
+        &mut self,
+        path: impl IntoHash,
+    ) -> Option<TableMut<'_, SearchFolder>> {
+        let index = self.search.search_folder_lookup.get(path.into_hash())?;
+        TableMut::new(self, |archive| &mut archive.search.search_folder, index)
+    }
+
+    pub fn lookup_search_path(&self, path: impl IntoHash) -> Option<TableRef<'_, SearchPath>> {
+        let index = self.search.search_path_lookup.get(path.into_hash())?;
+        let link = self.search.search_path_link.get(index)?;
+        if link.is_invalid() {
+            return None;
+        }
+
+        TableRef::new(self, &self.search.search_path, link.path_index())
+    }
+
+    pub fn lookup_search_path_mut(
+        &mut self,
+        path: impl IntoHash,
+    ) -> Option<TableMut<'_, SearchPath>> {
+        let index = self.search.search_path_lookup.get(path.into_hash())?;
+        let link = self.search.search_path_link.get(index)?;
+        if link.is_invalid() {
+            return None;
+        }
+
+        let index = link.path_index();
+
+        TableMut::new(self, |archive| &mut archive.search.search_path, index)
+    }
+
+    pub fn insert_search_path(&mut self, path: SearchPath) -> u32 {
+        let link_index = if self.search.path_link_real_count as usize
+            >= self.search.search_path_link.len()
+            || true
+        {
+            let index = self.search.search_path.push(path);
+            self.search
+                .search_path_link
+                .push(SearchPathLink::new(index))
+        } else {
+            let index = self.search.path_link_real_count;
+            self.search.path_link_real_count += 1;
+            *self.search.search_path_link.get_mut(index).unwrap() = SearchPathLink::new(index);
+            *self.search.search_path.get_mut(index).unwrap() = path;
+            index
+        };
+
+        self.search
+            .search_path_lookup
+            .insert(path.path(), link_index);
+        link_index
+    }
+
     pub fn insert_file_path(&mut self, path: FilePath) -> u32 {
         let path_idx = self.push_file_path(path);
         self.resource
@@ -533,6 +669,7 @@ impl Archive {
 
     pub fn reserialize(&mut self) {
         self.resource.reserialize_internal();
+        self.search.reserialize_internal();
     }
 
     pub fn read<R: Read + Seek>(reader: &mut R) -> Self {

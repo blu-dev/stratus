@@ -207,6 +207,11 @@ impl Display for MemoryUsageReport {
     }
 }
 
+pub struct InternPathResult {
+    pub range: SmolRange,
+    pub is_new: bool,
+}
+
 impl HashMemorySlab {
     fn init(get_memory: impl FnOnce(NonZeroUsize, NonZeroUsize) -> Box<[u8]>) -> Self {
         const fn align_up(value: usize, align: usize) -> usize {
@@ -390,7 +395,7 @@ impl HashMemorySlab {
         })
     }
 
-    pub fn intern_path(&mut self, cache: &mut InternerCache, path: &Utf8Path) -> SmolRange {
+    pub fn intern_path(&mut self, cache: &mut InternerCache, path: &Utf8Path) -> InternPathResult {
         let range_start = u24::from_u32(self.component_len as u32);
         let mut len = 0u8;
 
@@ -398,7 +403,10 @@ impl HashMemorySlab {
 
         if let Some(cached) = Self::try_cache_or_finalized_self(self, cache, full_hash) {
             unsafe {
-                return (*self.hashes)[cached.to_u32() as usize].range;
+                return InternPathResult {
+                    range: (*self.hashes)[cached.to_u32() as usize].range,
+                    is_new: false,
+                };
             }
         }
 
@@ -471,7 +479,10 @@ impl HashMemorySlab {
             *bucket_len += 1;
         }
 
-        SmolRange::new(len, range_start)
+        InternPathResult {
+            range: SmolRange::new(len, range_start),
+            is_new: true,
+        }
     }
 
     pub fn finalize(&mut self, cache: InternerCache) {

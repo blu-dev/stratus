@@ -2,7 +2,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use smash_hash::{Hash40, Hash40Map};
 
 use crate::{
-    data::IntoHash,
+    data::{FilePath, IntoHash},
     hash_interner::{HashMemorySlab, InternerCache, SmolRange},
     HashDisplay, FILE_SYSTEM,
 };
@@ -46,9 +46,15 @@ impl DiscoveredFile {
     }
 }
 
+pub struct NewFile {
+    pub filepath: FilePath,
+    pub size: u32,
+}
+
 pub struct FileSystem {
     roots: Vec<Utf8PathBuf>,
     files: Hash40Map<DiscoveredFile>,
+    pub new_files: Vec<NewFile>,
 }
 
 impl FileSystem {
@@ -82,6 +88,7 @@ pub fn discover_and_update_hashes(
     let mut file_system = FileSystem {
         roots: vec![],
         files: Hash40Map::default(),
+        new_files: vec![],
     };
 
     for folder in mods_root.read_dir_utf8().unwrap() {
@@ -102,7 +109,12 @@ pub fn discover_and_update_hashes(
                     if let Some(ext) = file_path.extension() {
                         hash.intern_path(cache, Utf8Path::new(ext));
                     }
-                    hash.intern_path(cache, file_path).range();
+                    if hash.intern_path(cache, file_path).is_new {
+                        file_system.new_files.push(NewFile {
+                            filepath: FilePath::from_utf8_path(file_path),
+                            size: len,
+                        });
+                    }
                     file_system.files.insert(
                         file_path.into_hash(),
                         DiscoveredFile {

@@ -161,7 +161,7 @@ bitflags::bitflags! {
     #[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
     pub struct FileInfoFlags : u32 {
         const IS_REGULAR_FILE = 1 << 4;
-        const IS_GRAPHCIS_ARCHIVE = 1 << 12;
+        const IS_GRAPHICS_ARCHIVE = 1 << 12;
         const IS_LOCALIZED = 1 << 15;
         const IS_REGIONAL = 1 << 16;
         const IS_SHARED = 1 << 20;
@@ -351,6 +351,14 @@ pub struct FileInfo {
 
 impl FileInfo {
     // const RESHARED_FILE_PATH_BIT: u32 = 0x80000000;
+    pub fn new(path: u32, entity: u32, desc: u32, flags: FileInfoFlags) -> Self {
+        Self {
+            path,
+            entity,
+            desc,
+            flags,
+        }
+    }
 
     pub fn flags(&self) -> FileInfoFlags {
         self.flags
@@ -482,6 +490,10 @@ impl FileEntity {
     pub fn package_or_group(&self) -> u32 {
         self.package_or_group
     }
+
+    pub fn set_info(&mut self, index: u32) {
+        self.info = index;
+    }
 }
 
 impl<'a> TableRef<'a, FileEntity> {
@@ -507,6 +519,26 @@ pub struct FilePath {
 }
 
 impl FilePath {
+    pub fn from_utf8_path(path: impl AsRef<Utf8Path>) -> Self {
+        let path = path.as_ref();
+        let parent_str = path.parent().unwrap().as_str();
+        let mut parent = Hash40::const_new(parent_str);
+        if !parent_str.ends_with('/') {
+            parent = parent.const_with("/");
+        }
+        let file_name = path
+            .file_name()
+            .map(Hash40::const_new)
+            .unwrap_or(Hash40::from_raw(0));
+        let extension = path
+            .extension()
+            .map(Hash40::const_new)
+            .unwrap_or(Hash40::from_raw(0));
+        let path = Hash40::const_new(path.as_str());
+
+        Self::from_parts(path, parent, file_name, extension, 0xFFFFFF)
+    }
+
     pub fn from_parts(
         path: Hash40,
         parent: Hash40,
@@ -626,6 +658,13 @@ impl<'a> TableRef<'a, FilePackage> {
     }
 }
 
+impl<'a> TableMut<'a, FilePackage> {
+    pub fn set_info_range(&mut self, start: u32, count: u32) {
+        self.info_start = start;
+        self.info_count = count;
+    }
+}
+
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
 pub struct FilePackageChild(HashWithData);
@@ -679,20 +718,213 @@ pub struct StreamPath {
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
 pub struct SearchFolder {
-    pub path_and_folder_count: HashWithData,
-    pub parent_and_file_count: HashWithData,
+    path_and_folder_count: HashWithData,
+    parent_and_file_count: HashWithData,
     name: Hash,
     first_child_index: u32,
     _padding: u32,
 }
 
+impl SearchFolder {
+    pub fn path(&self) -> Hash40 {
+        self.path_and_folder_count.hash40()
+    }
+
+    pub fn folder_count(&self) -> u32 {
+        self.path_and_folder_count.data()
+    }
+
+    pub fn set_folder_count(&mut self, count: u32) {
+        self.path_and_folder_count.set_data(count);
+    }
+
+    pub fn name(&self) -> Hash40 {
+        self.name.hash40()
+    }
+
+    pub fn parent(&self) -> Hash40 {
+        self.parent_and_file_count.hash40()
+    }
+
+    pub fn file_count(&self) -> u32 {
+        self.parent_and_file_count.data()
+    }
+
+    pub fn set_file_count(&mut self, count: u32) {
+        self.parent_and_file_count.set_data(count);
+    }
+
+    pub fn set_first_child_index(&mut self, index: u32) {
+        self.first_child_index = index;
+    }
+}
+
+impl<'a> TableRef<'a, SearchFolder> {
+    pub fn first_child(&self) -> TableRef<'a, SearchPath> {
+        self.archive()
+            .get_search_path_link(self.first_child_index)
+            .unwrap()
+            .path()
+    }
+}
+
+impl<'a> TableMut<'a, SearchFolder> {
+    pub fn first_child_ref(&self) -> TableRef<'_, SearchPath> {
+        self.archive()
+            .get_search_path_link(self.first_child_index)
+            .unwrap()
+            .path()
+    }
+
+    pub fn first_child_mut(&mut self) -> TableMut<'_, SearchPath> {
+        let index = self.first_child_index;
+        self.archive_mut()
+            .get_search_path_link_mut(index)
+            .unwrap()
+            .path()
+    }
+
+    pub fn first_child(self) -> TableMut<'a, SearchPath> {
+        let index = self.first_child_index;
+        self.into_archive_mut()
+            .get_search_path_link_mut(index)
+            .unwrap()
+            .path()
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
 pub struct SearchPath {
-    pub path_and_next_index: HashWithData,
-    pub parent_and_is_folder: HashWithData,
+    path_and_next_index: HashWithData,
+    parent_and_is_folder: HashWithData,
     name: Hash,
     extension: Hash,
+}
+
+impl SearchPath {
+    const IS_FOLDER_BIT: u32 = 0x0040_0000;
+
+    pub fn new(
+        path: impl IntoHash,
+        parent: impl IntoHash,
+        name: impl IntoHash,
+        extension: impl IntoHash,
+    ) -> Self {
+        Self {
+            path_and_next_index: HashWithData::new(path.into_hash(), 0xFFFFFF),
+            parent_and_is_folder: HashWithData::new(parent.into_hash(), 0x0),
+            name: Hash::from_hash40(name.into_hash()),
+            extension: Hash::from_hash40(extension.into_hash()),
+        }
+    }
+
+    pub fn from_file_path(path: &FilePath) -> Self {
+        Self::new(
+            path.path(),
+            path.parent().const_trim_trailing("/"),
+            path.file_name(),
+            path.extension(),
+        )
+    }
+
+    pub fn path(&self) -> Hash40 {
+        self.path_and_next_index.hash40()
+    }
+
+    pub fn parent(&self) -> Hash40 {
+        self.parent_and_is_folder.hash40()
+    }
+
+    pub fn name(&self) -> Hash40 {
+        self.name.hash40()
+    }
+
+    pub fn extension(&self) -> Option<Hash40> {
+        if self.is_folder() {
+            None
+        } else {
+            Some(self.extension.hash40())
+        }
+    }
+
+    pub fn is_folder(&self) -> bool {
+        self.parent_and_is_folder.data() & Self::IS_FOLDER_BIT != 0
+    }
+
+    pub fn is_end(&self) -> bool {
+        self.path_and_next_index.data() == 0xFFFFFF
+    }
+
+    pub fn set_end(&mut self) {
+        self.set_next_index(0xFFFFFF);
+    }
+
+    pub fn set_next_index(&mut self, index: u32) {
+        self.path_and_next_index.set_data(index);
+    }
+}
+
+impl<'a> TableRef<'a, SearchPath> {
+    pub fn next(&self) -> TableRef<'a, SearchPath> {
+        assert!(!self.is_end());
+        self.archive()
+            .get_search_path_link(self.path_and_next_index.data())
+            .unwrap()
+            .path()
+    }
+
+    pub fn as_folder(&self) -> TableRef<'a, SearchFolder> {
+        assert!(self.is_folder());
+        self.archive().lookup_search_folder(self.path()).unwrap()
+    }
+}
+
+impl<'a> TableMut<'a, SearchPath> {
+    pub fn next_ref(&self) -> TableRef<'_, SearchPath> {
+        assert!(!self.is_end());
+        self.archive()
+            .get_search_path_link(self.path_and_next_index.data())
+            .unwrap()
+            .path()
+    }
+
+    pub fn next_mut(&mut self) -> TableMut<'_, SearchPath> {
+        assert!(!self.is_end());
+        let index = self.path_and_next_index.data();
+        self.archive_mut()
+            .get_search_path_link_mut(index)
+            .unwrap()
+            .path()
+    }
+
+    pub fn next(self) -> TableMut<'a, SearchPath> {
+        assert!(!self.is_end());
+        let index = self.path_and_next_index.data();
+        self.into_archive_mut()
+            .get_search_path_link_mut(index)
+            .unwrap()
+            .path()
+    }
+
+    pub fn as_folder_ref(&self) -> TableRef<'_, SearchFolder> {
+        assert!(self.is_folder());
+        self.archive().lookup_search_folder(self.path()).unwrap()
+    }
+
+    pub fn as_folder_mut(&mut self) -> TableMut<'_, SearchFolder> {
+        assert!(self.is_folder());
+        let path = self.path();
+        self.archive_mut().lookup_search_folder_mut(path).unwrap()
+    }
+
+    pub fn as_folder(self) -> TableMut<'a, SearchFolder> {
+        assert!(self.is_folder());
+        let path = self.path();
+        self.into_archive_mut()
+            .lookup_search_folder_mut(path)
+            .unwrap()
+    }
 }
 
 #[repr(C)]
@@ -704,11 +936,49 @@ impl SearchPathLink {
         Self(path_index)
     }
 
+    pub const fn path_index(&self) -> u32 {
+        self.0
+    }
+
     pub const fn invalid() -> Self {
         Self(u32::MAX)
     }
 
     pub const fn is_invalid(&self) -> bool {
         self.0 == u32::MAX
+    }
+}
+
+impl<'a> TableRef<'a, SearchPathLink> {
+    pub fn path(&self) -> TableRef<'a, SearchPath> {
+        assert!(!self.is_invalid());
+        self.archive().get_search_path(self.0).unwrap()
+    }
+
+    pub fn try_path(&self) -> Option<TableRef<'a, SearchPath>> {
+        if self.is_invalid() {
+            None
+        } else {
+            Some(self.archive().get_search_path(self.0).unwrap())
+        }
+    }
+}
+
+impl<'a> TableMut<'a, SearchPathLink> {
+    pub fn path_ref(&self) -> TableRef<'_, SearchPath> {
+        assert!(!self.is_invalid());
+        self.archive().get_search_path(self.0).unwrap()
+    }
+
+    pub fn path_mut(&mut self) -> TableMut<'_, SearchPath> {
+        assert!(!self.is_invalid());
+        let index = self.0;
+        self.archive_mut().get_search_path_mut(index).unwrap()
+    }
+
+    pub fn path(self) -> TableMut<'a, SearchPath> {
+        assert!(!self.is_invalid());
+        let index = self.0;
+        self.into_archive_mut().get_search_path_mut(index).unwrap()
     }
 }
