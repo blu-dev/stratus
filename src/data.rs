@@ -166,6 +166,7 @@ bitflags::bitflags! {
         const IS_REGIONAL = 1 << 16;
         const IS_SHARED = 1 << 20;
         const IS_UNKNOWN_FLAG = 1 << 21;
+        const IS_GROUP_FIXED = 1 << 30;
         const IS_RESHARED = 1 << 31;
     }
 
@@ -359,9 +360,14 @@ impl FileInfo {
         self.flags = flags;
     }
 
-    pub fn set_path_as_reshared(&mut self) {
+    pub fn set_as_reshared(&mut self) {
         assert!(!self.flags.intersects(FileInfoFlags::IS_RESHARED));
         self.flags |= FileInfoFlags::IS_RESHARED;
+    }
+
+    pub fn set_as_group_fixed(&mut self) {
+        assert!(!self.flags.intersects(FileInfoFlags::IS_GROUP_FIXED));
+        self.flags |= FileInfoFlags::IS_GROUP_FIXED;
     }
 
     pub fn set_path(&mut self, path: u32) {
@@ -446,7 +452,12 @@ impl<'a> TableMut<'a, FileInfo> {
         self.archive().get_file_desc(self.desc).unwrap()
     }
 
-    pub fn desc_mut(self) -> TableMut<'a, FileDescriptor> {
+    pub fn desc_mut(&mut self) -> TableMut<'_, FileDescriptor> {
+        let index = self.desc;
+        self.archive_mut().get_file_desc_mut(index).unwrap()
+    }
+
+    pub fn desc(self) -> TableMut<'a, FileDescriptor> {
         // println!("{self:?} => {:?}", self.archive().get_file_path(self.path));
         let index = self.desc;
         self.into_archive_mut().get_file_desc_mut(index).unwrap()
@@ -601,7 +612,7 @@ impl<'a> TableRef<'a, FilePackage> {
             .get_file_group(self.path_and_group.data())
             .unwrap();
 
-        if dg.redirection > self.archive().num_file_package() as u32 {
+        if dg.redirection > self.archive().num_file_package() as u32 && dg.redirection != 0xFFFFFF {
             Some(self.archive().get_file_group(dg.redirection).unwrap())
         } else {
             None

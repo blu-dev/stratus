@@ -158,11 +158,11 @@ fn init_hashes() {
 
         let elapsed = now.elapsed().as_secs_f32();
         match load_method {
-            LoadMethod::Blob => println!("[stratus::hashes] Loaded hash blob in {elapsed:.3}s"),
+            LoadMethod::Blob => log::info!("[stratus::hashes] Loaded hash blob in {elapsed:.3}s"),
             LoadMethod::HashFile => {
-                println!("[stratus::hashes] Generated hash blob in {elapsed:.3}s")
+                log::info!("[stratus::hashes] Generated hash blob in {elapsed:.3}s")
             }
-            LoadMethod::Missing => println!("[stratus::hashes] No hash blob generated"),
+            LoadMethod::Missing => log::info!("[stratus::hashes] No hash blob generated"),
         }
 
         let mut cache = slab.create_cache();
@@ -211,7 +211,7 @@ fn print_info(ctx: &skyline::hooks::InlineCtx) {
     let index = ctx.registers[8].w();
     let info = ARCHIVE.get().unwrap().get_file_info(index).unwrap();
     let path = info.file_path();
-    println!("{}", path.path_and_entity.hash40().display());
+    log::info!("{}", path.path_and_entity.hash40().display());
 }
 
 #[skyline::from_offset(0x392cc60)]
@@ -236,7 +236,7 @@ fn handle_inflate_io_swaps(ctx: &mut InlineCtx) {
     let target_offset_into_read = x20 + x21;
 
     if offset_into_read < target_offset_into_read {
-        println!("Attempting to self-manage io swaps");
+        log::info!("Attempting to self-manage io swaps");
 
         let mut threshold = offset_into_read - x20;
         let mut x22 = ctx.registers[24].x();
@@ -288,13 +288,13 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
 
     let path = match info.try_file_path() {
         TryFilePathResult::FilePath(path) => {
-            log::info!("[jemalloc_hook] Inflating file {}", path.path().display());
+            // log::info!("[jemalloc_hook] Inflating file {}", path.path().display());
             path.path_and_entity.hash40()
         }
         TryFilePathResult::Reshared(path) => {
             log::info!(
                 "[jemalloc_hook] Inflating reshared file {}",
-                path.path().display()
+                path.path().const_trim_trailing(".reshared").display()
             );
             // #[cfg(not(feature = "verbose_logging"))]
             // {
@@ -303,7 +303,7 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
 
             // #[cfg(feature = "verbose_logging")]
             // {
-            //     println!("Encountered reshared file pointing at '{}''s original data, skipping file replacement", path.path_and_entity.hash40().display());
+            //     log::info!("Encountered reshared file pointing at '{}''s original data, skipping file replacement", path.path_and_entity.hash40().display());
             // }
 
             let ptr = unsafe { jemalloc(ctx.registers[0].x(), ctx.registers[1].x()) };
@@ -318,7 +318,7 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
         let x20 = ctx.registers[20].x();
         let x21 = ctx.registers[21].x();
         let target_offset_into_read = x20 + x21;
-        println!(
+        log::info!(
             "Attempting to load {} with cursor {:#x} | {:#x} | {:#x} | {:#x} ({} / {})",
             path.display(),
             offset_into_read,
@@ -499,10 +499,10 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
 
     let path = match info.try_file_path() {
         TryFilePathResult::FilePath(path) => {
-            log::info!(
-                "[process_single_patched_file_request] Loading file {}",
-                path.path().display()
-            );
+            // log::info!(
+            //     "[process_single_patched_file_request] Loading file {}",
+            //     path.path().display()
+            // );
             path
         }
 
@@ -618,7 +618,7 @@ fn loading_thread_assign_patched_pointer(ctx: &mut InlineCtx) {
     // SAFETY: We are only accessing this static mut inside of the ResLoadingThread, so it's not worth the overhead
     // of a mutex lock here
     if let Some(pointer) = unsafe { LOADING_THREAD_PATCHED_POINTER.take() } {
-        log::info!("[loading_thread_assigned_patch_pointer] Setting patched file pointer");
+        // log::info!("[loading_thread_assigned_patch_pointer] Setting patched file pointer");
         ctx.registers[8].set_x(pointer as u64);
     }
 }
@@ -688,7 +688,28 @@ pub fn main() {
 
         let mut unshare_cache = Hash40Map::default();
         let mut reverse_unshare_cache: HashMap<u32, ReshareFileInfo> = HashMap::default();
-        let mut rename_cache = Vec::new();
+        let mut rename_cache = HashSet::new();
+        let mut unshare_secondary_cache: HashMap<u32, Vec<u32>> = HashMap::default();
+        // let mut file_group_info_fix = HashSet::new();
+
+        for package in archive.iter_file_package() {
+            if let Some(group) = package.file_group() {
+                for info in group.file_info_slice() {
+                    if info.entity().info().index() != info.index() {
+                        log::info!(
+                            "Secondary Unshare: {} ({:#x})",
+                            info.file_path().path().display(),
+                            info.index()
+                        );
+
+                        unshare_secondary_cache
+                            .entry(info.file_path().index())
+                            .or_default()
+                            .push(info.index());
+                    }
+                }
+            }
+        }
 
         for package_idx in 0..archive.num_file_package() {
             let package = archive.get_file_package(package_idx as u32).unwrap();
@@ -716,12 +737,12 @@ pub fn main() {
                     // to check if the index of the file info is >= the index of the first FileGroup's FileInfo. Perhaps at a later
                     // date we will do it that way
                     if info.file_path().index() == shared_info.file_path().index() {
-                        // if shared_info.desc().load_method().is_skip() {
-                        rename_cache.push(shared_info.index());
-                        // } else {
-                        // Skip unsharing since this file should continue to be shared to itself
-                        // continue;
-                        // }
+                        if shared_info.desc().load_method().is_skip() {
+                            rename_cache.insert(shared_info.index());
+                        } else {
+                            // Skip unsharing since this file should continue to be shared to itself
+                            continue;
+                        }
                     }
                     entry.dependents.push(info.index());
 
@@ -771,9 +792,9 @@ pub fn main() {
                 info.desc_ref().load_method() // original_info.display()
             );
             info.set_path(new_fp_idx);
-            // info.set_path_as_reshared();
-            // info.desc_mut()
-            //     .set_load_method(FileLoadMethod::PackageSkip(file));
+            info.set_as_reshared();
+            info.desc()
+                .set_load_method(FileLoadMethod::PackageSkip(file));
         }
 
         for (path, file) in ReadOnlyFileSystem::file_system().files() {
@@ -785,7 +806,7 @@ pub fn main() {
                         .into_archive_mut()
                         .get_file_info_mut(unshare_info.real_info_index)
                         .unwrap();
-                    println!(
+                    log::info!(
                         "Unsharing {} from {}: ({:?} | {:?})",
                         info.path_ref().path_and_entity.hash40().display(),
                         info.path_ref()
@@ -799,12 +820,12 @@ pub fn main() {
                         info.flags(),
                         info.desc_ref().load_method()
                     );
-                    let mut data =
-                        FileData::new_for_unsharing(file.size(), unshare_info.group_offset);
-
-                    data.set_compressed_size(1);
-
-                    let new_data_idx = info.archive_mut().push_file_data(data);
+                    let new_data_idx =
+                        info.archive_mut()
+                            .push_file_data(FileData::new_for_unsharing(
+                                file.size(),
+                                unshare_info.group_offset,
+                            ));
 
                     let data_group_idx = info
                         .archive()
@@ -818,6 +839,7 @@ pub fn main() {
                     desc.set_group(data_group_idx);
                     desc.set_load_method(FileLoadMethod::Owned(0));
                     let new_desc_idx = info.archive_mut().push_file_desc(desc);
+
                     let new_entity_idx = info.archive_mut().push_file_entity(FileEntity::new(
                         unshare_info.package_index,
                         unshare_info.real_info_index,
@@ -827,6 +849,20 @@ pub fn main() {
                     info.set_entity(new_entity_idx);
                     info.set_desc(new_desc_idx);
                     info.path_mut().set_entity(new_entity_idx);
+
+                    if let Some(secondary) =
+                        unshare_secondary_cache.remove(&info.path_ref().index())
+                    {
+                        let archive = info.into_archive_mut();
+                        for secondary in secondary {
+                            let mut secondary_info = archive.get_file_info_mut(secondary).unwrap();
+                            secondary_info.flags().set(FileInfoFlags::IS_SHARED, false);
+                            secondary_info
+                                .flags()
+                                .set(FileInfoFlags::IS_UNKNOWN_FLAG, false);
+                            secondary_info.set_entity(new_entity_idx);
+                        }
+                    }
                 } else {
                     let mut info_mut = path.entity_mut().info_mut();
 
@@ -843,7 +879,7 @@ pub fn main() {
                         let new_desc_idx = archive.push_file_desc(desc);
                         info.set_desc(new_desc_idx);
                         info.set_entity(archive.num_file_entity() as u32);
-                        info.set_path_as_reshared();
+                        info.set_as_reshared();
                         let new_info_idx = archive.push_file_info(info);
                         let entity = FileEntity::new(group_idx, new_info_idx);
                         let new_entity_idx = archive.push_file_entity(entity);
@@ -854,19 +890,19 @@ pub fn main() {
                             if dependent_info.entity_ref().index() != entity_index {
                                 continue;
                             }
-                            println!(
+                            log::info!(
                                 "Reversing shared requirement for {}",
                                 dependent_info.path_ref().path_and_entity.hash40().display()
                             );
 
                             dependent_info.path_mut().set_entity(new_entity_idx);
                             dependent_info.set_entity(new_entity_idx);
-                            let mut dependent_desc = dependent_info.desc_mut();
+                            let mut dependent_desc = dependent_info.desc();
                             dependent_desc.set_load_method(FileLoadMethod::Unowned(new_entity_idx));
                         }
                     }
 
-                    let mut data = info_mut.desc_mut().data_mut();
+                    let mut data = info_mut.desc().data_mut();
 
                     data.patch(file.size());
                 }
@@ -874,6 +910,39 @@ pub fn main() {
         }
 
         archive.reserialize();
+
+        /* Scanning for shared file path
+         */
+
+        let target_entity_index = 0x25aa7;
+        for fp in archive.iter_file_path() {
+            if fp.entity().index() == target_entity_index {
+                log::info!(
+                    "File {} ({:#x}) points to entity",
+                    fp.path().display(),
+                    fp.index()
+                );
+            }
+        }
+
+        for fi in archive.iter_file_info() {
+            if fi.entity().index() == target_entity_index {
+                log::info!(
+                    "Info {} ({:#x}) points to entity",
+                    fi.file_path().path().display(),
+                    fi.index()
+                );
+            }
+        }
+
+        for fd in archive.iter_file_desc() {
+            match fd.load_method() {
+                FileLoadMethod::Unowned(entity) if entity == target_entity_index => {
+                    log::info!("Desc {:#x} points to entity", fd.index());
+                }
+                _ => {}
+            }
+        }
 
         ReadOnlyArchive(archive)
     });
