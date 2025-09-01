@@ -97,14 +97,11 @@ pub fn discover_and_update_hashes(
                 folder.path(),
                 &mut |file_path: &Utf8Path, len: u32| {
                     if let Some(file_name) = file_path.file_name() {
-                        println!("{file_name}");
                         hash.intern_path(cache, Utf8Path::new(file_name));
                     }
                     if let Some(ext) = file_path.extension() {
-                        println!("{ext}");
                         hash.intern_path(cache, Utf8Path::new(ext));
                     }
-                    println!("{file_path}");
                     hash.intern_path(cache, file_path).range();
                     file_system.files.insert(
                         file_path.into_hash(),
