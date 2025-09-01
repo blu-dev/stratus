@@ -675,3 +675,40 @@ pub struct StreamPath {
     path_and_desc: HashWithData,
     flags: StreamFileFlags,
 }
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
+pub struct SearchFolder {
+    pub path_and_folder_count: HashWithData,
+    pub parent_and_file_count: HashWithData,
+    name: Hash,
+    first_child_index: u32,
+    _padding: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
+pub struct SearchPath {
+    pub path_and_next_index: HashWithData,
+    pub parent_and_is_folder: HashWithData,
+    name: Hash,
+    extension: Hash,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
+pub struct SearchPathLink(u32);
+
+impl SearchPathLink {
+    pub const fn new(path_index: u32) -> Self {
+        Self(path_index)
+    }
+
+    pub const fn invalid() -> Self {
+        Self(u32::MAX)
+    }
+
+    pub const fn is_invalid(&self) -> bool {
+        self.0 == u32::MAX
+    }
+}

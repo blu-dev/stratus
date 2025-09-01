@@ -628,8 +628,13 @@ fn loading_thread_assign_patched_pointer(ctx: &mut InlineCtx) {
  *  that we have already done.
  */
 #[skyline::hook(offset = 0x3750c2c, inline)]
-fn skip_load_arc_table(ctx: &mut InlineCtx) {
-    ctx.registers[0].set_x(ReadOnlyArchive::get().data_ptr() as u64);
+fn skip_load_resource_tables(ctx: &mut InlineCtx) {
+    ctx.registers[0].set_x(ReadOnlyArchive::get().resource_data_ptr() as u64);
+}
+
+#[skyline::hook(offset = 0x3750c44, inline)]
+fn skip_load_search_tables(ctx: &mut InlineCtx) {
+    ctx.registers[0].set_x(ReadOnlyArchive::get().search_data_ptr() as u64);
 }
 
 fn patch_res_threads() {
@@ -648,6 +653,7 @@ fn patch_res_threads() {
     Patch::in_text(0x3542f64).data(0xD61F0060u32).unwrap(); // br x3 (replacing mov x2, x21)
 
     Patch::in_text(0x3750c2c).nop().unwrap();
+    Patch::in_text(0x3750c44).nop().unwrap();
 }
 
 extern "C" {
@@ -690,7 +696,6 @@ pub fn main() {
         let mut reverse_unshare_cache: HashMap<u32, ReshareFileInfo> = HashMap::default();
         let mut rename_cache = HashSet::new();
         let mut unshare_secondary_cache: HashMap<u32, Vec<u32>> = HashMap::default();
-        // let mut file_group_info_fix = HashSet::new();
 
         for package in archive.iter_file_package() {
             if let Some(group) = package.file_group() {
@@ -953,7 +958,8 @@ pub fn main() {
     }
 
     skyline::install_hooks!(
-        skip_load_arc_table,
+        skip_load_resource_tables,
+        skip_load_search_tables,
         jemalloc_hook,
         skip_load_hook,
         skip_load_hook_p2,

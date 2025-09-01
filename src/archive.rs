@@ -10,8 +10,10 @@ use crate::{
     containers::{BucketLookup, IndexLookup, Table, TableMut, TableRef, TableSliceRef},
     data::{
         FileData, FileDescriptor, FileEntity, FileGroup, FileInfo, FilePackage, FilePackageChild,
-        FilePath, IntoHash, StreamData, StreamEntity, StreamFolder, StreamPath,
+        FilePath, IntoHash, SearchFolder, SearchPath, SearchPathLink, StreamData, StreamEntity,
+        StreamFolder, StreamPath,
     },
+    HashDisplay,
 };
 
 fn read_pod<R: Read, T: Pod>(reader: &mut R) -> T {
@@ -147,7 +149,7 @@ pub struct ArchiveMetadata {
     pub file_data_offset: u64,
     pub shared_file_data_offset: u64,
     pub resource_table_offset: u64,
-    pub user_table_offset: u64,
+    pub search_table_offset: u64,
     pub unknown_table_offset: u64,
 }
 
@@ -163,6 +165,16 @@ impl ArchiveMetadata {
         assert_eq!(this.magic, Self::MAGIC, "{:#x}", this.magic);
         *this
     }
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable, PartialEq, Eq)]
+pub struct SearchTableHeader {
+    search_data_size: u32,
+    _padding: u32,
+    folder_count: u32,
+    path_link_count: u32,
+    path_count: u32,
 }
 
 const REGION_COUNT: usize = 5;
@@ -213,13 +225,15 @@ pub struct ResourceTableHeader {
     pub stream_data_count: u32,
 }
 
-impl ResourceTableHeader {
-    pub fn read<R: Read>(reader: &mut R) -> Self {
-        let this: Self = read_pod(reader);
-        assert_eq!(this.region_count as usize, REGION_COUNT);
-        assert_eq!(this.locale_count as usize, LOCALE_COUNT);
-        this
-    }
+pub struct SearchTables {
+    raw: Box<[u8]>,
+    header: SearchTableHeader,
+    search_folder_lookup: IndexLookup,
+    search_folder: Table<SearchFolder>,
+    search_path_lookup: IndexLookup,
+    search_path_link: Table<SearchPathLink>,
+    search_path: Table<SearchPath>,
+    path_link_real_count: u32,
 }
 
 pub struct ResourceTables {
@@ -240,6 +254,50 @@ pub struct ResourceTables {
     file_info: Table<FileInfo>,
     file_desc: Table<FileDescriptor>,
     file_data: Table<FileData>,
+}
+
+impl SearchTables {
+    #[allow(unused_assignments)]
+    pub fn from_bytes(mut bytes: Box<[u8]>) -> Self {
+        let mut cursor = 0usize;
+        let header: SearchTableHeader = *bytemuck::from_bytes(
+            &bytes[cursor..cursor + std::mem::size_of::<SearchTableHeader>()],
+        );
+
+        cursor += std::mem::size_of::<SearchTableHeader>();
+
+        macro_rules! fetch {
+            ($t:path, $count:expr) => {
+                unsafe {
+                    let table = <$t>::new(&mut bytes[cursor..], ($count) as usize);
+                    cursor += table.fixed_byte_len();
+                    table
+                }
+            };
+        }
+
+        let search_folder_lookup = fetch!(IndexLookup, header.folder_count);
+        let search_folder = fetch!(Table<SearchFolder>, header.folder_count);
+        let search_path_lookup = fetch!(IndexLookup, header.path_link_count);
+        let search_path_link = fetch!(Table<SearchPathLink>, header.path_link_count);
+        let search_path = fetch!(Table<SearchPath>, header.path_count);
+        let path_link_real_count = search_path_link
+            .iter()
+            .find(|(_, link)| link.is_invalid())
+            .map(|(idx, _)| idx)
+            .unwrap_or(search_path_link.len() as u32);
+
+        Self {
+            raw: bytes,
+            header,
+            search_folder_lookup,
+            search_folder,
+            search_path_lookup,
+            search_path_link,
+            search_path,
+            path_link_real_count,
+        }
+    }
 }
 
 impl ResourceTables {
@@ -386,6 +444,7 @@ impl ResourceTables {
 pub struct Archive {
     metadata: ArchiveMetadata,
     resource: ResourceTables,
+    search: SearchTables,
 }
 
 macro_rules! decl_lookup {
@@ -485,10 +544,25 @@ impl Archive {
 
         let decompressed = read_compressed_section(reader);
         let resource = ResourceTables::from_bytes(decompressed.into_boxed_slice());
-        Self { metadata, resource }
+
+        reader
+            .seek(SeekFrom::Start(metadata.search_table_offset))
+            .unwrap();
+        let decompressed = read_compressed_section(reader);
+        let search = SearchTables::from_bytes(decompressed.into_boxed_slice());
+
+        Self {
+            metadata,
+            resource,
+            search,
+        }
     }
 
-    pub fn data_ptr(&self) -> *const u8 {
+    pub fn resource_data_ptr(&self) -> *const u8 {
         self.resource.raw.as_ptr()
+    }
+
+    pub fn search_data_ptr(&self) -> *const u8 {
+        self.search.raw.as_ptr()
     }
 }
