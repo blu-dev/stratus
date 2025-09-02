@@ -1,4 +1,7 @@
-use std::{cell::UnsafeCell, io::Read};
+use std::{
+    cell::UnsafeCell,
+    io::{BufReader, Read},
+};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use skyline::nn::fs::FileHandle;
@@ -119,6 +122,7 @@ impl std::io::Read for NnsdkFile {
 pub struct DiscoveredFile {
     root_idx: u32,
     size: u32,
+    wayfinder: Option<rawzip::ZipArchiveEntryWayfinder>,
 }
 
 impl DiscoveredFile {
@@ -136,7 +140,7 @@ pub enum ModRoot {
     Folder(Utf8PathBuf),
     Zip {
         path: Utf8PathBuf,
-        archive: UnsafeCell<zip::ZipArchive<std::fs::File>>,
+        archive: UnsafeCell<rawzip::ZipArchive<rawzip::FileReader>>,
     },
 }
 
@@ -177,8 +181,12 @@ impl FileSystem {
                 let archive = unsafe { &mut *archive.get() };
 
                 let local_path = hash.display().to_string();
-                let mut file = archive.by_name(&local_path).unwrap();
-                file.read_exact(buffer).unwrap();
+                let wayfinder = self.files.get(&hash).unwrap().wayfinder.unwrap();
+                let mut file = archive.get_entry(wayfinder).unwrap();
+                let mut decompressor =
+                    flate2::bufread::DeflateDecoder::new(BufReader::new(file.reader()));
+                decompressor.read_exact(buffer).unwrap();
+                // file.read_exact(buffer).unwrap();
                 // if count != buffer.len() {
                 //     panic!(
                 //         "Failed to load zip file {}: read {:#x} bytes vs {:#x}",
@@ -214,6 +222,7 @@ pub fn discover_and_update_hashes(
             continue;
         }
 
+        let now = std::time::Instant::now();
         if root.file_type().unwrap().is_dir() {
             let root_idx: u32 = file_system.roots.len().try_into().unwrap();
             file_system
@@ -240,29 +249,31 @@ pub fn discover_and_update_hashes(
                         DiscoveredFile {
                             root_idx,
                             size: len,
+                            wayfinder: None,
                         },
                     );
                 },
             );
         } else if root.file_type().unwrap().is_file() && root.path().extension() == Some("zip") {
-            let archive = std::fs::File::open(root.path()).unwrap();
-            let mut zip_archive = zip::ZipArchive::new(archive).unwrap();
             let root_idx: u32 = file_system.roots.len().try_into().unwrap();
+            let now = std::time::Instant::now();
+            let mut buffer = vec![0u8; rawzip::RECOMMENDED_BUFFER_SIZE];
+            let archive = rawzip::ZipArchive::from_file(
+                std::fs::File::open(root.path()).unwrap(),
+                &mut buffer,
+            )
+            .unwrap();
 
-            let mut indices = vec![];
-            for path in zip_archive.file_names() {
-                indices.push(zip_archive.index_for_name(path).unwrap());
-            }
+            file_system.files.reserve(archive.entries_hint() as usize);
 
-            for index in indices {
-                let file = zip_archive.by_index(index).unwrap();
-
-                if file.is_dir() {
+            let mut entries_iter = archive.entries(&mut buffer);
+            while let Some(entry) = entries_iter.next_entry().unwrap() {
+                if entry.is_dir() {
                     continue;
                 }
-
-                let path = file.name();
-                let path = Utf8Path::new(path);
+                let path = Utf8Path::new(unsafe {
+                    std::str::from_utf8_unchecked(entry.file_path().as_bytes())
+                });
                 if let Some(file_name) = path.file_name() {
                     hash.intern_path(cache, Utf8Path::new(file_name));
                 }
@@ -270,7 +281,7 @@ pub fn discover_and_update_hashes(
                     hash.intern_path(cache, Utf8Path::new(ext));
                 }
 
-                let size = file.size();
+                let size = entry.uncompressed_size_hint() as u32;
 
                 if hash.intern_path(cache, path).is_new {
                     file_system.new_files.push(NewFile {
@@ -278,20 +289,115 @@ pub fn discover_and_update_hashes(
                         size: size as u32,
                     });
                 }
+                // intern_elapsed += now.elapsed();
+
                 file_system.files.insert(
                     path.into_hash(),
                     DiscoveredFile {
                         root_idx,
                         size: size as u32,
+                        wayfinder: Some(entry.wayfinder()),
                     },
                 );
             }
+            println!(
+                "Processing rawzip took: {:.3}ms",
+                now.elapsed().as_micros() as f32 / 1000.0
+            );
 
             file_system.roots.push(ModRoot::Zip {
                 path: root.path().to_path_buf(),
-                archive: UnsafeCell::new(zip_archive),
+                archive: UnsafeCell::new(archive),
             });
+
+            // let archive = rawzip::ZipArchive::from_file(
+            //     std::fs::File::open(root.path()).unwrap(),
+            //     &mut buffer,
+            // )
+            // .unwrap();
+
+            // let now = std::time::Instant::now();
+            // let mut zip_archive =
+            //     zip::ZipArchive::new(BufReader::new(std::fs::File::open(root.path()).unwrap()))
+            //         .unwrap();
+            // println!(
+            //     "[stratus::discovery] Read zip file in {:.3}s",
+            //     now.elapsed().as_secs_f32()
+            // );
+
+            // let mut indices = vec![];
+            // let now = std::time::Instant::now();
+            // for path in zip_archive.file_names() {
+            //     indices.push(zip_archive.index_for_name(path).unwrap());
+            // }
+            // println!(
+            //     "[stratus::discovery] Iterating file names {:.3}ms",
+            //     now.elapsed().as_micros() as f32 / 1000.0
+            // );
+
+            // let now = std::time::Instant::now();
+            // let mut obtain_elapsed = std::time::Duration::from_millis(0);
+            // let mut is_dir_elapsed = std::time::Duration::from_millis(0);
+            // let mut is_dir_count = 0;
+            // let mut intern_elapsed = std::time::Duration::from_millis(0);
+            // let mut total = 0usize;
+            // for index in indices {
+            //     is_dir_count += 1;
+            //     let now = std::time::Instant::now();
+            //     let file = zip_archive.by_index(index).unwrap();
+            //     obtain_elapsed += now.elapsed();
+
+            //     let now = std::time::Instant::now();
+            //     if file.is_dir() {
+            //         is_dir_elapsed += now.elapsed();
+            //         continue;
+            //     }
+
+            //     total += 1;
+
+            //     let now = std::time::Instant::now();
+            //     let path = file.name();
+            //     let path = Utf8Path::new(path);
+            //     if let Some(file_name) = path.file_name() {
+            //         hash.intern_path(cache, Utf8Path::new(file_name));
+            //     }
+            //     if let Some(ext) = path.extension() {
+            //         hash.intern_path(cache, Utf8Path::new(ext));
+            //     }
+
+            //     let size = file.size();
+
+            //     if hash.intern_path(cache, path).is_new {
+            //         file_system.new_files.push(NewFile {
+            //             filepath: FilePath::from_utf8_path(path),
+            //             size: size as u32,
+            //         });
+            //     }
+            //     intern_elapsed += now.elapsed();
+
+            //     file_system.files.insert(
+            //         path.into_hash(),
+            //         DiscoveredFile {
+            //             root_idx,
+            //             size: size as u32,
+            //         },
+            //     );
+            // }
+
+            // println!(
+            //     "[stratus::discovery] Avg time per file: Obtain={:.3}ms, IsDir={:.3}ms, Intern={:.3}ms, Total={:.3}ms",
+            //     obtain_elapsed.as_millis() as f32 / is_dir_count as f32,
+            //     is_dir_elapsed.as_millis() as f32 / is_dir_count as f32,
+            //     intern_elapsed.as_millis() as f32 / total as f32,
+            //     now.elapsed().as_millis() as f32 / total as f32,
+            // );
         }
+
+        println!(
+            "[stratus::discovery] Discovered {} in {:.3}s",
+            root.path(),
+            now.elapsed().as_secs_f32()
+        );
     }
 
     file_system

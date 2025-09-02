@@ -2,7 +2,6 @@ use std::{
     alloc::Layout,
     collections::{HashMap, HashSet},
     fs::File,
-    io::Read,
     ops::Deref,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -12,7 +11,6 @@ use std::{
 };
 
 use camino::Utf8Path;
-use log::LevelFilter;
 use skyline::hooks::InlineCtx;
 use smash_hash::{Hash40, Hash40Map};
 
@@ -20,11 +18,10 @@ use crate::{
     archive::Archive,
     data::{
         FileData, FileDescriptor, FileEntity, FileInfo, FileInfoFlags, FileLoadMethod, FilePath,
-        IntoHash, SearchPath, TryFilePathResult,
+        SearchPath, TryFilePathResult,
     },
     discover::{FileSystem, NewFile},
     hash_interner::{DisplayHash, HashMemorySlab},
-    logger::NxKernelLogger,
 };
 
 mod archive;
@@ -161,15 +158,20 @@ fn init_hashes() {
 
         let elapsed = now.elapsed().as_secs_f32();
         match load_method {
-            LoadMethod::Blob => log::info!("[stratus::hashes] Loaded hash blob in {elapsed:.3}s"),
+            LoadMethod::Blob => println!("[stratus::hashes] Loaded hash blob in {elapsed:.3}s"),
             LoadMethod::HashFile => {
-                log::info!("[stratus::hashes] Generated hash blob in {elapsed:.3}s")
+                println!("[stratus::hashes] Generated hash blob in {elapsed:.3}s")
             }
-            LoadMethod::Missing => log::info!("[stratus::hashes] No hash blob generated"),
+            LoadMethod::Missing => println!("[stratus::hashes] No hash blob generated"),
         }
 
         let mut cache = slab.create_cache();
+        let now = std::time::Instant::now();
         let file_system = discover::discover_and_update_hashes(&mut slab, &mut cache);
+        println!(
+            "[stratus::hashes] Discovered mod files in {:.3}s",
+            now.elapsed().as_secs_f32()
+        );
         slab.finalize(cache);
 
         ReadOnlyFileSystem {
@@ -208,14 +210,6 @@ unsafe impl Send for ReadOnlyArchive {}
 unsafe impl Sync for ReadOnlyArchive {}
 
 static ARCHIVE: OnceLock<ReadOnlyArchive> = OnceLock::new();
-
-#[skyline::hook(offset = 0x3542a74, inline)]
-fn print_info(ctx: &skyline::hooks::InlineCtx) {
-    let index = ctx.registers[8].w();
-    let info = ARCHIVE.get().unwrap().get_file_info(index).unwrap();
-    let path = info.file_path();
-    log::info!("{}", path.path_and_entity.hash40().display());
-}
 
 #[skyline::from_offset(0x392cc60)]
 fn jemalloc(size: u64, align: u64) -> *mut u8;
@@ -678,6 +672,11 @@ extern "C" {
 pub fn main() {
     // logger::install_hooks();
 
+    unsafe {
+        set_overclock_enabled(true);
+        set_cpu_boost_mode(1);
+    }
+    let instant = std::time::Instant::now();
     std::panic::set_hook(Box::new(|info| {
         let location = info.location().unwrap();
 
@@ -696,21 +695,20 @@ pub fn main() {
                         err_msg.as_str(),
                     );
     }));
-    let now = std::time::Instant::now();
-
-    unsafe {
-        set_overclock_enabled(true);
-        set_cpu_boost_mode(1);
-    }
     init_folder();
     init_hashes();
     patch_res_threads();
-    let _ = log::set_logger(Box::leak(Box::new(NxKernelLogger::new())));
-    unsafe { log::set_max_level_racy(LevelFilter::Info) };
+    // let _ = log::set_logger(Box::leak(Box::new(NxKernelLogger::new())));
+    // unsafe { log::set_max_level_racy(LevelFilter::Info) };
 
     ARCHIVE.get_or_init(|| {
         let mut file = File::open("rom:/data.arc").unwrap();
+        let now = std::time::Instant::now();
         let mut archive = archive::Archive::read(&mut file);
+        println!(
+            "[stratus::patching] Loaded archive tables in {:.3}s",
+            now.elapsed().as_secs_f32()
+        );
 
         struct UnsharedFileInfo {
             real_infos: Vec<u32>,
@@ -728,6 +726,7 @@ pub fn main() {
         let mut rename_cache = HashSet::new();
         let mut unshare_secondary_cache: HashMap<u32, Vec<u32>> = HashMap::default();
 
+        let now = std::time::Instant::now();
         for package in archive.iter_file_package() {
             if let Some(group) = package.file_group() {
                 for info in group.file_info_slice() {
@@ -746,7 +745,12 @@ pub fn main() {
                 }
             }
         }
+        println!(
+            "[stratus::patching] Built unshare-secondary cache in {:.3}s",
+            now.elapsed().as_secs_f32()
+        );
 
+        let now = std::time::Instant::now();
         for package_idx in 0..archive.num_file_package() {
             let package = archive.get_file_package(package_idx as u32).unwrap();
             let infos = package.infos();
@@ -810,7 +814,12 @@ pub fn main() {
                 }
             }
         }
+        println!(
+            "[stratus::patching] Built unshare and rename cache in {:.3}s",
+            now.elapsed().as_secs_f32()
+        );
 
+        let now = std::time::Instant::now();
         for file in rename_cache {
             let mut info = archive.get_file_info_mut(file).unwrap();
             let file_path = info.path_ref().clone();
@@ -832,7 +841,12 @@ pub fn main() {
             info.desc()
                 .set_load_method(FileLoadMethod::PackageSkip(file));
         }
+        println!(
+            "[stratus::patching] Renamed group-shared files in {:.3}s",
+            now.elapsed().as_secs_f32()
+        );
 
+        let now = std::time::Instant::now();
         for (path, file) in ReadOnlyFileSystem::file_system().files() {
             if let Some(path) = archive.lookup_file_path_mut(*path) {
                 let path_hash = path.path_and_entity.hash40();
@@ -964,9 +978,14 @@ pub fn main() {
                 }
             }
         }
+        println!(
+            "[stratus::patching] Unshared files in {:.3}s",
+            now.elapsed().as_secs_f32()
+        );
 
         let mut new_files_by_package: Hash40Map<Vec<&NewFile>> = Hash40Map::default();
 
+        let now = std::time::Instant::now();
         for file in ReadOnlyFileSystem::file_system().new_files.iter() {
             // Just means that the user didn't have a hashes file
             if archive.lookup_file_path(file.filepath.path()).is_some() {
@@ -1019,7 +1038,12 @@ pub fn main() {
                 new_files_by_package.entry(package).or_default().push(&file);
             }
         }
+        println!(
+            "[stratus::patching] Built file-addition cache and updated search section in {:.3}s",
+            now.elapsed().as_secs_f32()
+        );
 
+        let now = std::time::Instant::now();
         for (package_hash, files) in new_files_by_package {
             if files.is_empty() {
                 continue;
@@ -1082,8 +1106,17 @@ pub fn main() {
                 .unwrap()
                 .set_info_range(new_range_start, new_range_len);
         }
+        println!(
+            "[stratus::patching] Added files in {:.3}s",
+            now.elapsed().as_secs_f32()
+        );
 
+        let now = std::time::Instant::now();
         archive.reserialize();
+        println!(
+            "[stratus::patching] Rebuilt archive tables in {:.3}s",
+            now.elapsed().as_secs_f32()
+        );
 
         ReadOnlyArchive(archive)
     });
@@ -1093,7 +1126,7 @@ pub fn main() {
         set_cpu_boost_mode(0);
     }
 
-    panic!("Booted in {}s", now.elapsed().as_secs_f32());
+    // panic!("Booted in {}s", instant.elapsed().as_secs_f32());
 
     skyline::install_hooks!(
         skip_load_resource_tables,
@@ -1102,6 +1135,6 @@ pub fn main() {
         skip_load_hook,
         skip_load_hook_p2,
         process_single_patched_file_request,
-        loading_thread_assign_patched_pointer
+        loading_thread_assign_patched_pointer,
     );
 }
