@@ -180,12 +180,30 @@ impl FileSystem {
             ModRoot::Zip { archive, .. } => {
                 let archive = unsafe { &mut *archive.get() };
 
-                let local_path = hash.display().to_string();
                 let wayfinder = self.files.get(&hash).unwrap().wayfinder.unwrap();
-                let mut file = archive.get_entry(wayfinder).unwrap();
-                let mut decompressor =
-                    flate2::bufread::DeflateDecoder::new(BufReader::new(file.reader()));
-                decompressor.read_exact(buffer).unwrap();
+                let file = archive.get_entry(wayfinder).unwrap();
+
+                let layout = std::alloc::Layout::from_size_align(
+                    wayfinder.compressed_size_hint() as usize,
+                    0x1,
+                )
+                .unwrap();
+                let compressed_buffer = unsafe { std::alloc::alloc(layout) };
+
+                assert!(!compressed_buffer.is_null());
+
+                let slice = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        compressed_buffer,
+                        wayfinder.compressed_size_hint() as usize,
+                    )
+                };
+
+                file.reader().read_exact(slice).unwrap();
+
+                flate2::bufread::DeflateDecoder::new(std::io::Cursor::new(slice))
+                    .read_exact(buffer)
+                    .unwrap();
                 // file.read_exact(buffer).unwrap();
                 // if count != buffer.len() {
                 //     panic!(
@@ -232,6 +250,9 @@ pub fn discover_and_update_hashes(
                 root.path(),
                 root.path(),
                 &mut |file_path: &Utf8Path, len: u32| {
+                    if len == 0 {
+                        println!("{file_path} has a len of 0");
+                    }
                     if let Some(file_name) = file_path.file_name() {
                         hash.intern_path(cache, Utf8Path::new(file_name));
                     }
