@@ -54,8 +54,8 @@ impl log::Log for NxKernelLogger {
                 .unwrap_or_else(|| record.level() <= Level::Info)
             {
                 let message = format!("[{: <5}]  {}", record.level(), record.args());
-                println!("{message}");
-                // unsafe { print_debug_string(message.as_ptr().cast(), message.len()) };
+                // println!("{message}");
+                unsafe { print_debug_string(message.as_ptr().cast(), message.len()) };
             }
         }
     }

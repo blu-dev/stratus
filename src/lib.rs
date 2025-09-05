@@ -287,7 +287,11 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
 
     let path = match info.try_file_path() {
         TryFilePathResult::FilePath(path) => {
-            log::info!("[jemalloc_hook] Inflating file {}", path.path().display());
+            // log::info!(
+            //     "[jemalloc_hook] Inflating file {} with load method {:#x}",
+            //     path.path().display(),
+            //     unsafe { *res_service.add(0x234).cast::<u32>() }
+            // );
             path.path_and_entity.hash40()
         }
         TryFilePathResult::Reshared(path) => {
@@ -348,7 +352,7 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
         // We are checking the load method here. If it is 4 (single file) then that means we loaded the pointer in ResLoadingThread
         // and don't need to repeat the file IO here. The data_ptr should get replaced the next time that the game needs to load
         // something so we don't need to worry about other file loads reading from that pointer
-        if unsafe { *res_service.add(0x234).cast::<u32>() == 0x4 } && false {
+        if unsafe { *res_service.add(0x234).cast::<u32>() == 0x4 } {
             log::info!("[jemalloc_hook] Taking loaded file pointer from ResLoadingThread (single file replacement)");
             ptr = unsafe { *res_service.add(0x218).cast::<*mut u8>() };
         } else {
@@ -539,8 +543,13 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
 
     // SAFETY: Referencing BUFFER here is safe since this is an inline hook only ever called from within
     // ResLoadingThread. It effectively becomes a function local variable
-    if let Some(size) =
-        ReadOnlyFileSystem::file_system().get_full_file_path(path, unsafe { &mut BUFFER })
+    if let Some(size) = ReadOnlyFileSystem::file_system()
+        .get_full_file_path(path, unsafe { &mut BUFFER })
+        .filter(|_| {
+            !info
+                .flags()
+                .intersects(FileInfoFlags::IS_LOCALIZED | FileInfoFlags::IS_REGIONAL)
+        })
     {
         log::info!(
             "[process_single_patched_file_request] Replacing file {}",
@@ -605,7 +614,7 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
 
         // SAFETY: We need to track this pointer down a little bit when we hand it over to ResInflateThread. Storing it in a static mut is fine
         // as long as we only reference it from code that runs inside of this loading thread.
-        unsafe { LOADING_THREAD_PATCHED_POINTER = Some(buffer) };
+        unsafe { assert!(LOADING_THREAD_PATCHED_POINTER.replace(buffer).is_none()) };
     } else {
         // OUT VARIABLES: This is the vanilla codepath, so we need to set the pointer to the instruction we want to jump to
         //  as well as simulate the instruction that we replaced (mov x2, x21)
@@ -626,7 +635,7 @@ fn loading_thread_assign_patched_pointer(ctx: &mut InlineCtx) {
     // SAFETY: We are only accessing this static mut inside of the ResLoadingThread, so it's not worth the overhead
     // of a mutex lock here
     if let Some(pointer) = unsafe { LOADING_THREAD_PATCHED_POINTER.take() } {
-        // log::info!("[loading_thread_assigned_patch_pointer] Setting patched file pointer");
+        log::info!("[loading_thread_assigned_patch_pointer] Setting patched file pointer");
         ctx.registers[8].set_x(pointer as u64);
     }
 }
@@ -658,7 +667,7 @@ fn patch_res_threads() {
     Patch::in_text(0x3544758).data(0xB5001583u32).unwrap(); // cbnz x3, #0x2b0 (replacing ldr x2, [sp, #0x28])
 
     // process_single_patched_file_request
-    // Patch::in_text(0x3542f64).data(0xD61F0060u32).unwrap(); // br x3 (replacing mov x2, x21)
+    Patch::in_text(0x3542f64).data(0xD61F0060u32).unwrap(); // br x3 (replacing mov x2, x21)
 
     // skip_load_resource_tables
     Patch::in_text(0x3750c2c).nop().unwrap();
@@ -673,6 +682,34 @@ extern "C" {
 
     #[link_name = "_ZN2nn2oe15SetCpuBoostModeENS0_12CpuBoostModeE"]
     fn set_cpu_boost_mode(val: i32);
+}
+
+#[skyline::hook(offset = 0x3544a1c, inline)]
+fn panic_set_invalid_state(ctx: &InlineCtx) {
+    if ctx.registers[8].w() == 0xFFFFFFFF {
+        let res_service = ctx.registers[19].x() as *const u8;
+        let current_index = ctx.registers[27].w();
+        let absolute_index = unsafe { *res_service.add(0x230).cast::<u32>() } + current_index;
+        let Some(info) = ReadOnlyArchive::get().get_file_info(absolute_index) else {
+            panic!("ResInflateThread handed invalid info index");
+        };
+        panic!("Loading file {} failed", info.file_path().path().display());
+    }
+}
+
+#[skyline::hook(offset = 0x3543c34, inline)]
+fn observe_res_service_inflate(ctx: &InlineCtx) {
+    let res_service = ctx.registers[19].x() as *const u8;
+    let current_index = ctx.registers[27].w();
+    let absolute_index = unsafe { *res_service.add(0x230).cast::<u32>() } + current_index;
+    let Some(info) = ReadOnlyArchive::get().get_file_info(absolute_index) else {
+        panic!("ResInflateThread handed invalid info index");
+    };
+    log::info!(
+        "[observe_inflate] Inflating file {} with load method {:#x}",
+        info.try_file_path().unwrap().path().display(),
+        unsafe { *res_service.add(0x234).cast::<u32>() }
+    );
 }
 
 #[skyline::main(name = "stratus")]
@@ -695,10 +732,10 @@ pub fn main() {
             },
         };
 
-        let err_msg = format!("smashline has panicked: '{}', {}", msg, location);
+        let err_msg = format!("smashline has panicked: '{}', {}\0", msg, location);
         skyline::error::show_error(
                         69,
-                        "Smashline has panicked! Please open Details and post an issue at https://github.com/HDR-Development/smashline.",
+                        "Smashline has panicked! Please open Details and post an issue at https://github.com/HDR-Development/smashline.\0",
                         err_msg.as_str(),
                     );
     }));
@@ -713,25 +750,13 @@ pub fn main() {
         let now = std::time::Instant::now();
         let mut archive = archive::Archive::read(&mut file);
 
-        // for info in archive.iter_file_info() {
-        //     if info.file_path().path()
-        //         == Hash40::const_new("ui/replace/stage/stage_1/stage_1_poke_yamabuki.bntx")
-        //     {
-        //         println!("INFO: {:#x?}", info);
-        //         println!("DESCRIPTOR: {:#x?}", info.desc());
-        //         println!("DATA: {:#x?}", info.desc().data());
-        //     }
-        // }
-
-        // panic!();
-
         println!(
             "[stratus::patching] Loaded archive tables in {:.3}s",
             now.elapsed().as_secs_f32()
         );
 
         struct UnsharedFileInfo {
-            real_infos: Vec<u32>,
+            real_infos: Vec<(u32, u32)>,
             group_offset: u32,
             package_index: u32,
         }
@@ -747,6 +772,7 @@ pub fn main() {
         let mut unshare_secondary_cache: HashMap<u32, Vec<u32>> = HashMap::default();
 
         let now = std::time::Instant::now();
+
         for package in archive.iter_file_package() {
             if let Some(group) = package.file_group() {
                 for info in group.file_info_slice() {
@@ -773,6 +799,11 @@ pub fn main() {
         let now = std::time::Instant::now();
         for package_idx in 0..archive.num_file_package() {
             let package = archive.get_file_package(package_idx as u32).unwrap();
+            // if package.path() == Hash40::const_new("fighter/jack/result/c07")
+            //     || package.path() == Hash40::const_new("fighter/jack/append/c07")
+            // {
+            //     continue;
+            // }
             let infos = package.infos();
             for idx in 0..infos.len() {
                 let info = infos.get_local(idx).unwrap();
@@ -806,31 +837,16 @@ pub fn main() {
                     }
                     entry.dependents.push(info.index());
 
-                    let mut group_offset = 0;
-                    for prev_idx in (0..idx).rev().skip(1) {
-                        let prev_info = infos.get_local(prev_idx).unwrap();
-                        if !prev_info.flags().intersects(
-                            FileInfoFlags::IS_SHARED
-                                | FileInfoFlags::IS_REGIONAL
-                                | FileInfoFlags::IS_LOCALIZED,
-                        ) && !prev_info.desc().load_method().is_owned()
-                        {
-                            let data = prev_info.desc().data();
-                            group_offset = data.group_offset() + data.compressed_size();
-                            break;
-                        }
-                    }
-
-                    group_offset = (group_offset + 0xf) & 0x10;
+                    // group_offset = (group_offset + 0xf) & 0x10;
                     unshare_cache
                         .entry(info.file_path().path_and_entity.hash40())
                         .or_insert_with(|| UnsharedFileInfo {
                             real_infos: vec![],
                             package_index: package.index(),
-                            group_offset,
+                            group_offset: 0,
                         })
                         .real_infos
-                        .push(info.index());
+                        .push((package_idx as u32, info.index()));
                 }
             }
         }
@@ -876,22 +892,34 @@ pub fn main() {
                     //     .into_archive_mut()
                     //     .get_file_info_mut(unshare_info.real_info_index)
                     //     .unwrap();
+                    let source_path = archive
+                        .get_file_info(unshare_info.real_infos[0].1)
+                        .unwrap()
+                        .file_path()
+                        .entity()
+                        .info()
+                        .try_file_path()
+                        .unwrap()
+                        .path();
+
                     log::info!(
-                        "Unsharing {} from {}: ({:x?})",
+                        "Unsharing {} from {}",
                         path_hash.display(),
-                        archive
-                            .get_file_info(unshare_info.real_infos[0])
-                            .unwrap()
-                            .file_path()
-                            .entity()
-                            .info()
-                            .try_file_path()
-                            .unwrap()
-                            .path_and_entity
-                            .hash40()
-                            .display(),
-                        unshare_info.real_infos,
+                        source_path.display(),
                     );
+                    for (package_idx, info_idx) in unshare_info.real_infos.iter().copied() {
+                        log::info!(
+                            "\tInfo {:#x} in {} (Flags: {:?})",
+                            info_idx,
+                            archive
+                                .get_file_package(package_idx)
+                                .unwrap()
+                                .path()
+                                .display(),
+                            archive.get_file_info(info_idx).unwrap().flags(),
+                        );
+                    }
+
                     let new_data_idx = archive.push_file_data(FileData::new_for_unsharing(
                         file.size(),
                         unshare_info.group_offset,
@@ -907,19 +935,20 @@ pub fn main() {
                     // desc.set_data(new_data_idx);
                     // desc.set_group(data_group_idx);
                     // desc.set_load_method(FileLoadMethod::Owned(0));
+                    //
+
+                    let new_entity_idx = archive.push_file_entity(FileEntity::new(
+                        unshare_info.package_index,
+                        unshare_info.real_infos[0].1,
+                    ));
                     let new_desc_idx = archive.push_file_desc(FileDescriptor::new(
                         data_group_idx,
                         new_data_idx,
                         FileLoadMethod::Owned(0),
                     ));
 
-                    let new_entity_idx = archive.push_file_entity(FileEntity::new(
-                        unshare_info.package_index,
-                        unshare_info.real_infos[0],
-                    ));
-
                     let mut first_info = archive
-                        .get_file_info_mut(unshare_info.real_infos[0])
+                        .get_file_info_mut(unshare_info.real_infos[0].1)
                         .unwrap();
                     let flags = first_info.flags();
                     first_info.set_flags(
@@ -929,11 +958,12 @@ pub fn main() {
                     first_info.set_desc(new_desc_idx);
                     first_info.path_mut().set_entity(new_entity_idx);
 
-                    for info in unshare_info.real_infos.iter() {
+                    for (_, info) in unshare_info.real_infos.iter().skip(1) {
                         let archive = first_info.archive_mut();
                         let mut info = archive.get_file_info_mut(*info).unwrap();
                         info.set_entity(new_entity_idx);
-                        info.set_desc(new_desc_idx);
+                        info.desc_mut()
+                            .set_load_method(FileLoadMethod::Unowned(new_entity_idx));
                     }
 
                     if let Some(secondary) =
@@ -946,10 +976,9 @@ pub fn main() {
                         let archive = first_info.into_archive_mut();
                         for secondary in secondary {
                             let mut secondary_info = archive.get_file_info_mut(secondary).unwrap();
-                            secondary_info.flags().set(FileInfoFlags::IS_SHARED, false);
-                            secondary_info
-                                .flags()
-                                .set(FileInfoFlags::IS_UNKNOWN_FLAG, false);
+                            // let mut flags = secondary_info.flags();
+                            // flags.set(FileInfoFlags::IS_SHARED, false);
+                            // flags.set(FileInfoFlags::IS_UNKNOWN_FLAG, false);
                             secondary_info.set_entity(new_entity_idx);
                         }
                     }
@@ -1158,7 +1187,9 @@ pub fn main() {
         jemalloc_hook,
         skip_load_hook,
         skip_load_hook_p2,
-        // process_single_patched_file_request,
-        // loading_thread_assign_patched_pointer,
+        observe_res_service_inflate,
+        process_single_patched_file_request,
+        loading_thread_assign_patched_pointer,
+        panic_set_invalid_state,
     );
 }

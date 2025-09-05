@@ -647,6 +647,10 @@ pub struct FilePackage {
 }
 
 impl<'a> TableRef<'a, FilePackage> {
+    pub fn path(&self) -> Hash40 {
+        self.path_and_group.hash40()
+    }
+
     pub fn data_group(&self) -> TableRef<'a, FileGroup> {
         self.archive()
             .get_file_group(self.path_and_group.data())
