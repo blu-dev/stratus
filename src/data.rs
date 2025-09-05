@@ -368,6 +368,10 @@ impl FileInfo {
         self.flags = flags;
     }
 
+    pub fn set_non_localized(&mut self) {
+        self.flags &= !(FileInfoFlags::IS_LOCALIZED | FileInfoFlags::IS_REGIONAL)
+    }
+
     pub fn set_as_reshared(&mut self) {
         assert!(!self.flags.intersects(FileInfoFlags::IS_RESHARED));
         self.flags |= FileInfoFlags::IS_RESHARED;
@@ -457,11 +461,22 @@ impl<'a> TableMut<'a, FileInfo> {
     }
 
     pub fn desc_ref(&self) -> TableRef<'_, FileDescriptor> {
+        let index = if self.flags.contains(FileInfoFlags::IS_LOCALIZED) {
+            self.desc + 2
+        } else {
+            self.desc
+        };
+
         self.archive().get_file_desc(self.desc).unwrap()
     }
 
     pub fn desc_mut(&mut self) -> TableMut<'_, FileDescriptor> {
-        let index = self.desc;
+        let index = if self.flags.contains(FileInfoFlags::IS_LOCALIZED) {
+            self.desc + 2
+        } else {
+            self.desc
+        };
+
         self.archive_mut().get_file_desc_mut(index).unwrap()
     }
 

@@ -11,6 +11,7 @@ use std::{
 };
 
 use camino::Utf8Path;
+use log::LevelFilter;
 use skyline::hooks::InlineCtx;
 use smash_hash::{Hash40, Hash40Map};
 
@@ -22,6 +23,7 @@ use crate::{
     },
     discover::{FileSystem, NewFile},
     hash_interner::{DisplayHash, HashMemorySlab},
+    logger::NxKernelLogger,
 };
 
 mod archive;
@@ -328,8 +330,13 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
     }
 
     // SAFETY: This path is only going to be called from the ResInflateThread, so this being a "static" variable is effectively a TLS variable
-    if let Some(size) =
-        ReadOnlyFileSystem::file_system().get_full_file_path(path, unsafe { &mut BUFFER })
+    if let Some(size) = ReadOnlyFileSystem::file_system()
+        .get_full_file_path(path, unsafe { &mut BUFFER })
+        .filter(|_| {
+            !info
+                .flags()
+                .intersects(FileInfoFlags::IS_LOCALIZED | FileInfoFlags::IS_REGIONAL)
+        })
     {
         // SAFETY: See above
         log::info!("[jemalloc_hook] Replacing {}", unsafe { &BUFFER });
@@ -341,7 +348,7 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
         // We are checking the load method here. If it is 4 (single file) then that means we loaded the pointer in ResLoadingThread
         // and don't need to repeat the file IO here. The data_ptr should get replaced the next time that the game needs to load
         // something so we don't need to worry about other file loads reading from that pointer
-        if unsafe { *res_service.add(0x234).cast::<u32>() == 0x4 } {
+        if unsafe { *res_service.add(0x234).cast::<u32>() == 0x4 } && false {
             log::info!("[jemalloc_hook] Taking loaded file pointer from ResLoadingThread (single file replacement)");
             ptr = unsafe { *res_service.add(0x218).cast::<*mut u8>() };
         } else {
@@ -651,7 +658,7 @@ fn patch_res_threads() {
     Patch::in_text(0x3544758).data(0xB5001583u32).unwrap(); // cbnz x3, #0x2b0 (replacing ldr x2, [sp, #0x28])
 
     // process_single_patched_file_request
-    Patch::in_text(0x3542f64).data(0xD61F0060u32).unwrap(); // br x3 (replacing mov x2, x21)
+    // Patch::in_text(0x3542f64).data(0xD61F0060u32).unwrap(); // br x3 (replacing mov x2, x21)
 
     // skip_load_resource_tables
     Patch::in_text(0x3750c2c).nop().unwrap();
@@ -670,7 +677,7 @@ extern "C" {
 
 #[skyline::main(name = "stratus")]
 pub fn main() {
-    // logger::install_hooks();
+    logger::install_hooks();
 
     unsafe {
         set_overclock_enabled(true);
@@ -698,13 +705,26 @@ pub fn main() {
     init_folder();
     init_hashes();
     patch_res_threads();
-    // let _ = log::set_logger(Box::leak(Box::new(NxKernelLogger::new())));
-    // unsafe { log::set_max_level_racy(LevelFilter::Info) };
+    let _ = log::set_logger(Box::leak(Box::new(NxKernelLogger::new())));
+    unsafe { log::set_max_level_racy(LevelFilter::Info) };
 
     ARCHIVE.get_or_init(|| {
         let mut file = File::open("rom:/data.arc").unwrap();
         let now = std::time::Instant::now();
         let mut archive = archive::Archive::read(&mut file);
+
+        // for info in archive.iter_file_info() {
+        //     if info.file_path().path()
+        //         == Hash40::const_new("ui/replace/stage/stage_1/stage_1_poke_yamabuki.bntx")
+        //     {
+        //         println!("INFO: {:#x?}", info);
+        //         println!("DESCRIPTOR: {:#x?}", info.desc());
+        //         println!("DATA: {:#x?}", info.desc().data());
+        //     }
+        // }
+
+        // panic!();
+
         println!(
             "[stratus::patching] Loaded archive tables in {:.3}s",
             now.elapsed().as_secs_f32()
@@ -831,11 +851,11 @@ pub fn main() {
                 file_path.path_and_entity.data(),
             ));
 
-            // log::info!(
-            //     "Processing {} ({:#x?})",
-            //     file_path.path().display(),
-            //     info.desc_ref().load_method() // original_info.display()
-            // );
+            println!(
+                "Processing {} ({:#x?})",
+                file_path.path().display(),
+                info.desc_ref().load_method() // original_info.display()
+            );
             info.set_path(new_fp_idx);
             info.set_as_reshared();
             info.desc()
@@ -936,6 +956,13 @@ pub fn main() {
                 } else {
                     let mut info_mut = path.entity_mut().info_mut();
 
+                    if info_mut
+                        .flags()
+                        .intersects(FileInfoFlags::IS_LOCALIZED | FileInfoFlags::IS_REGIONAL)
+                    {
+                        continue;
+                    }
+
                     if let Some(reshare_info) = reverse_unshare_cache.remove(&info_mut.index()) {
                         assert_eq!(info_mut.index(), info_mut.entity_ref().info().index());
                         let mut info = info_mut.clone();
@@ -973,7 +1000,6 @@ pub fn main() {
                     }
 
                     let mut data = info_mut.desc().data_mut();
-
                     data.patch(file.size());
                 }
             }
@@ -1025,17 +1051,15 @@ pub fn main() {
 
                 let new_index = archive.insert_search_path(search_path);
 
-                let parent = archive
-                    .lookup_search_folder_mut(search_path.parent())
-                    .unwrap();
+                if let Some(parent) = archive.lookup_search_folder_mut(search_path.parent()) {
+                    let mut child = parent.first_child();
+                    while !child.is_end() {
+                        child = child.next();
+                    }
 
-                let mut child = parent.first_child();
-                while !child.is_end() {
-                    child = child.next();
+                    child.set_next_index(new_index);
+                    new_files_by_package.entry(package).or_default().push(&file);
                 }
-
-                child.set_next_index(new_index);
-                new_files_by_package.entry(package).or_default().push(&file);
             }
         }
         println!(
@@ -1134,7 +1158,7 @@ pub fn main() {
         jemalloc_hook,
         skip_load_hook,
         skip_load_hook_p2,
-        process_single_patched_file_request,
-        loading_thread_assign_patched_pointer,
+        // process_single_patched_file_request,
+        // loading_thread_assign_patched_pointer,
     );
 }
