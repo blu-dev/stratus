@@ -35,43 +35,66 @@ fn ru32<R: Read>(reader: &mut R) -> u32 {
     u32::from_le_bytes(bytes)
 }
 
+unsafe fn alloc_uninit(size: usize) -> Box<[u8]> {
+    Box::from_raw(std::slice::from_raw_parts_mut(
+        std::alloc::alloc(Layout::from_size_align(size, 0x10).unwrap()),
+        size,
+    ))
+}
+
 #[track_caller]
-fn read_exact_size<R: Read>(reader: &mut R, size: usize) -> Vec<u8> {
-    let mut uninit_vec = Vec::with_capacity(size);
-    // SAFETY: We require that the entire vec is filled by the reader
-    unsafe {
-        uninit_vec.set_len(size);
-    }
+fn read_exact_size<R: Read>(reader: &mut R, size: usize) -> Box<[u8]> {
+    // SAFETY: We initialize it here
+    let mut uninit = unsafe { alloc_uninit(size) };
 
     let count = reader
-        .read(&mut uninit_vec)
+        .read(&mut uninit)
         .expect("Failed to read from reader");
 
     // We don't need to worry about the panic unwindining dropping the uninit data since it's just u8 anyways
-    if count < uninit_vec.len() {
+    if count < uninit.len() {
         panic!("Failed to fill whole buffer");
     }
 
-    uninit_vec
+    uninit
 }
 
 #[repr(C)]
-struct ZstdBuffer {
-    ptr: *mut u8,
-    size: usize,
-    pos: usize,
+#[derive(Debug)]
+pub struct ZstdBuffer {
+    pub ptr: *mut u8,
+    pub size: usize,
+    pub pos: usize,
 }
 
 #[skyline::from_offset(0x39a2fc0)]
-fn decompress_stream(unk: *mut u64, output: &mut ZstdBuffer, input: &mut ZstdBuffer) -> usize;
+pub fn decompress_stream(unk: *mut u64, output: &mut ZstdBuffer, input: &mut ZstdBuffer) -> usize;
+
+#[repr(C)]
+struct ZstdDecompressor([u64; 2]);
 
 #[skyline::from_offset(0x35410b0)]
-fn initialize_decompressor(ptr: *mut u64) -> u64;
+fn initialize_decompressor(ptr: *mut ZstdDecompressor) -> u64;
 
 #[skyline::from_offset(0x3541030)]
-fn finalize_decompressor(ptr: *mut u64);
+fn finalize_decompressor(ptr: *mut ZstdDecompressor);
 
-pub fn read_compressed_section<R: Read + Seek>(reader: &mut R) -> Vec<u8> {
+#[repr(align(8), C)]
+struct FileNX([u8; 0x228]);
+
+#[skyline::from_offset(0x353a3c0)]
+fn init_file(file_nx: &mut *mut FileNX);
+
+#[skyline::from_offset(0x353a500)]
+fn open_file(file_nx: &mut *mut FileNX, path: *const i8) -> bool;
+
+#[skyline::from_offset(0x3540a90)]
+fn read_compressed_at_offset(file_nx: &mut *mut FileNX, offset: usize) -> *mut u8;
+
+#[skyline::from_offset(0x37c58c0)]
+fn read_into_ptr(file_nx: *mut FileNX, buffer: *mut u8, size: usize) -> usize;
+
+pub fn read_compressed_section<R: Read + Seek>(reader: &mut R) -> Box<[u8]> {
     const REQUIRED_TABLE_SIZE: u32 = 0x10;
 
     let start = reader.stream_position().unwrap();
@@ -81,55 +104,63 @@ pub fn read_compressed_section<R: Read + Seek>(reader: &mut R) -> Vec<u8> {
     let compressed_size = ru32(reader);
     let offset_to_next = ru32(reader);
 
-    let mut compressed = read_exact_size(reader, compressed_size as usize);
+    let mut file_ptr: *mut FileNX = std::ptr::null_mut();
 
-    // SAFETY: Reference call at 0x3540bb4 - instructions initialize 0x10 bytes worth of space and pass it to
-    // what we've labeled `initialize_decompressor`, it is the constructor for this type. It only uses
-    // the decompression codepath if the return value of the constructor is 0
-    let mut decompressor = [0u64; 2];
-    unsafe {
-        assert_eq!(initialize_decompressor(decompressor.as_mut_ptr()), 0);
-    }
+    // unsafe {
+    //     init_file(&mut file_ptr, c"rom:/data.arc".as_ptr());
+    // }
 
-    let mut decompressed = Vec::with_capacity(decompressed_size as usize);
-    // SAFETY: We assert that the count of bytes read by the compressor is the same as decompressed_size before
-    // returning the vec.
-    unsafe {
-        decompressed.set_len(decompressed_size as usize);
-    }
+    // let mut compressed = read_exact_size(reader, compressed_size as usize);
+    // println!("Read {:#x} bytes", compressed.len());
 
-    let mut input_buffer = ZstdBuffer {
-        ptr: compressed.as_mut_ptr(),
-        size: compressed.len(),
-        pos: 0,
-    };
+    // // SAFETY: Reference call at 0x3540bb4 - instructions initialize 0x10 bytes worth of space and pass it to
+    // // what we've labeled `initialize_decompressor`, it is the constructor for this type. It only uses
+    // // the decompression codepath if the return value of the constructor is 0
+    // let mut decompressor = ZstdDecompressor([0u64; 2]);
+    // unsafe {
+    //     assert_eq!(initialize_decompressor(&mut decompressor), 0);
+    //     // println!("{:#x?}", decompressor);
+    // }
 
-    let mut output_buffer = ZstdBuffer {
-        ptr: decompressed.as_mut_ptr(),
-        size: decompressed.len(),
-        pos: 0,
-    };
+    // // SAFETY: We initialize below, and we also assert that the count of bytes is the same
+    // //  as the decompressed size
+    // let mut decompressed = unsafe { alloc_uninit(decompressed_size as usize) };
 
-    // SAFETY: Reference call at 0x3540ca4 - Passes the second u64 from the initialize_decompressor call as well as two
-    // pointer buffers that match the structure as they are defined in this file: output first then input
-    let result = unsafe {
-        decompress_stream(
-            decompressor[1] as *mut u64,
-            &mut output_buffer,
-            &mut input_buffer,
-        )
-    };
+    // let mut input_buffer = ZstdBuffer {
+    //     ptr: compressed.as_mut_ptr(),
+    //     size: compressed.len(),
+    //     pos: 0,
+    // };
 
-    // NOTE: Call the destructor first since if we panic it will not exit with RAII (too lazy to write a struct for this)
-    // SAFETY: Destructor for the decompressor. Disassembly does not help ensure that this is the deconstructor,
-    // but in practice it seems to be fine and the function frees/releases data
-    unsafe {
-        finalize_decompressor(decompressor.as_mut_ptr());
-    }
+    // let mut output_buffer = ZstdBuffer {
+    //     ptr: decompressed.as_mut_ptr(),
+    //     size: decompressed.len(),
+    //     pos: 0,
+    // };
 
-    // Negative value for result is error code
-    assert_eq!(result, 0x0, "{result}");
-    assert_eq!(output_buffer.pos, decompressed_size as usize);
+    // // SAFETY: Reference call at 0x3540ca4 - Passes the second u64 from the initialize_decompressor call as well as two
+    // // pointer buffers that match the structure as they are defined in this file: output first then input
+    // let result = unsafe {
+    //     decompress_stream(
+    //         decompressor.0[1] as *mut u64,
+    //         &mut output_buffer,
+    //         &mut input_buffer,
+    //     )
+    // };
+
+    // // NOTE: Call the destructor first since if we panic it will not exit with RAII (too lazy to write a struct for this)
+    // // SAFETY: Destructor for the decompressor. Disassembly does not help ensure that this is the deconstructor,
+    // // but in practice it seems to be fine and the function frees/releases data
+    // unsafe {
+    //     // println!("{:#x?}", decompressor);
+    //     finalize_decompressor(&raw mut decompressor);
+    // }
+
+    // // Negative value for result is error code
+    // assert_eq!(result, 0x0, "{result}");
+    // assert_eq!(output_buffer.pos, decompressed_size as usize);
+
+    // println!("Read {} decompressed bytes", decompressed.len());
 
     // This should seek past the compressed section and go to the start of the next valid data
     // This might skip past more bytes than are in the compressed section, but that's how the file format
@@ -138,7 +169,7 @@ pub fn read_compressed_section<R: Read + Seek>(reader: &mut R) -> Vec<u8> {
         .seek(std::io::SeekFrom::Start(start + offset_to_next as u64))
         .unwrap();
 
-    decompressed
+    todo!()
 }
 
 #[repr(C)]
@@ -264,7 +295,6 @@ impl SearchTables {
                 $(
                     let $id = {
                         let current = total;
-                        println!(concat!(stringify!($id), "[{:#x} - {:#x}]"), current, current + self.$id.byte_len());
                         total += self.$id.byte_len();
                         current
                     };
@@ -355,7 +385,6 @@ impl ResourceTables {
                 $(
                     let $id = {
                         let current = total;
-                        println!(concat!(stringify!($id), "[{:#x} - {:#x}]"), current, current + self.$id.byte_len());
                         total += self.$id.byte_len();
                         current
                     };
@@ -461,8 +490,6 @@ impl ResourceTables {
                 + header.file_group_info_count
                 + header.versioned_file_data_count
         );
-
-        println!("{:x} vs {:x}", cursor, header.resource_data_size);
 
         Self {
             raw: bytes,
@@ -672,21 +699,37 @@ impl Archive {
         self.search.reserialize_internal();
     }
 
-    pub fn read<R: Read + Seek>(reader: &mut R) -> Self {
-        let metadata = ArchiveMetadata::read(reader);
-
-        reader
-            .seek(SeekFrom::Start(metadata.resource_table_offset))
-            .unwrap();
-
-        let decompressed = read_compressed_section(reader);
-        let resource = ResourceTables::from_bytes(decompressed.into_boxed_slice());
-
-        reader
-            .seek(SeekFrom::Start(metadata.search_table_offset))
-            .unwrap();
-        let decompressed = read_compressed_section(reader);
-        let search = SearchTables::from_bytes(decompressed.into_boxed_slice());
+    pub fn open() -> Self {
+        let mut metadata = ArchiveMetadata::zeroed();
+        let resource_slice;
+        let search_slice;
+        unsafe {
+            let mut file: *mut FileNX = std::ptr::null_mut();
+            init_file(&mut file);
+            let mut buffer = [0u8; 0x108];
+            buffer[0x100..0x108].copy_from_slice(bytemuck::bytes_of(&0xdu64));
+            buffer[.."rom:/data.arc".len()].copy_from_slice("rom:/data.arc".as_bytes());
+            open_file(&mut file, buffer.as_ptr().cast());
+            let size = read_into_ptr(
+                file,
+                (&raw mut metadata).cast::<u8>(),
+                std::mem::size_of::<ArchiveMetadata>(),
+            );
+            assert_eq!(size, 0x38);
+            assert!(metadata.magic == ArchiveMetadata::MAGIC);
+            let resource_ptr =
+                read_compressed_at_offset(&mut file, metadata.resource_table_offset as usize);
+            let resource_size =
+                (*resource_ptr.cast::<ResourceTableHeader>()).resource_data_size as usize;
+            let search_ptr =
+                read_compressed_at_offset(&mut file, metadata.search_table_offset as usize);
+            let search_size = (*search_ptr.cast::<SearchTableHeader>()).search_data_size as usize;
+            resource_slice =
+                Box::from_raw(std::slice::from_raw_parts_mut(resource_ptr, resource_size));
+            search_slice = Box::from_raw(std::slice::from_raw_parts_mut(search_ptr, search_size));
+        }
+        let resource = ResourceTables::from_bytes(resource_slice);
+        let search = SearchTables::from_bytes(search_slice);
 
         Self {
             metadata,

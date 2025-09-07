@@ -372,11 +372,13 @@ impl FileInfo {
         self.flags &= !(FileInfoFlags::IS_LOCALIZED | FileInfoFlags::IS_REGIONAL)
     }
 
+    #[track_caller]
     pub fn set_as_reshared(&mut self) {
         assert!(!self.flags.intersects(FileInfoFlags::IS_RESHARED));
         self.flags |= FileInfoFlags::IS_RESHARED;
     }
 
+    #[track_caller]
     pub fn set_as_group_fixed(&mut self) {
         assert!(!self.flags.intersects(FileInfoFlags::IS_GROUP_FIXED));
         self.flags |= FileInfoFlags::IS_GROUP_FIXED;

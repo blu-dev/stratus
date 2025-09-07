@@ -19,6 +19,7 @@ paste = "1.0.15"
 rawzip = "0.4.1"
 skyline = { git = "https://github.com/ultimate-research/skyline-rs" }
 smash-hash = { git = "https://github.com/blu-dev/smash-hash" }
+stats_alloc = "0.1.10"
 # smash-hash = { path = "../smash-hash/smash-hash" }
 
 [features]
