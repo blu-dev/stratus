@@ -1,4 +1,4 @@
-use std::{cell::UnsafeCell, io::Read};
+use std::io::Read;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use smash_hash::{Hash40, Hash40Map};
@@ -58,7 +58,7 @@ pub enum ModRoot {
     Folder(Utf8PathBuf),
     Zip {
         path: Utf8PathBuf,
-        archive: UnsafeCell<rawzip::ZipArchive<rawzip::FileReader>>,
+        archive: rawzip::ZipArchive<rawzip::FileReader>,
     },
 }
 
@@ -94,8 +94,6 @@ impl FileSystem {
                 assert!(count == buffer.len());
             }
             ModRoot::Zip { archive, .. } => {
-                let archive = unsafe { &mut *archive.get() };
-
                 let wayfinder = self.files.get(&hash).unwrap().wayfinder.unwrap();
                 let file = archive.get_entry(wayfinder).unwrap();
 
@@ -239,7 +237,7 @@ pub fn discover_and_update_hashes(
 
             file_system.roots.push(ModRoot::Zip {
                 path: root.path().to_path_buf(),
-                archive: UnsafeCell::new(archive),
+                archive,
             });
 
             // let archive = rawzip::ZipArchive::from_file(
