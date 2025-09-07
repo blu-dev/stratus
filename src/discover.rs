@@ -209,15 +209,6 @@ impl FileSystem {
                 unsafe {
                     std::alloc::dealloc(compressed_buffer, layout);
                 }
-                // file.read_exact(buffer).unwrap();
-                // if count != buffer.len() {
-                //     panic!(
-                //         "Failed to load zip file {}: read {:#x} bytes vs {:#x}",
-                //         hash.display(),
-                //         count,
-                //         buffer.len()
-                //     );
-                // }
             }
         }
     }

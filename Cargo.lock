@@ -158,7 +158,6 @@ dependencies = [
 [[package]]
 name = "smash-hash"
 version = "0.1.0"
-source = "git+https://github.com/blu-dev/smash-hash#9d50dab10b38f644b206aa171f0cd86a162c0c27"
 
 [[package]]
 name = "stats_alloc"

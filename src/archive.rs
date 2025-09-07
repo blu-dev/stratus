@@ -401,6 +401,9 @@ impl ResourceTables {
                 )*
 
                 self.header.resource_data_size = total as u32;
+                self.header.file_package_count = self.file_package.len() as u32;
+                self.header.file_package_child_count = self.file_package_child.len() as u32;
+                self.header.file_data_group_count = self.file_group.len() as u32 - self.header.versioned_file_group_count - self.header.file_info_group_count;
                 self.header.file_path_count = self.file_path.len() as u32;
                 self.header.file_entity_count = self.file_entity.len() as u32;
                 self.header.file_package_info_count = self.file_info.len() as u32 - self.header.versioned_file_info_count - self.header.file_group_info_count;
@@ -682,12 +685,29 @@ impl Archive {
         link_index
     }
 
+    pub fn insert_search_folder(&mut self, folder: SearchFolder) -> u32 {
+        let new_index = self.search.search_folder.push(folder);
+        let _ = self
+            .search
+            .search_folder_lookup
+            .insert(folder.path(), new_index);
+        new_index
+    }
+
     pub fn insert_file_path(&mut self, path: FilePath) -> u32 {
         let path_idx = self.push_file_path(path);
         self.resource
             .file_path_lookup
             .insert(path.path_and_entity.hash40(), path_idx);
         path_idx
+    }
+
+    pub fn insert_file_package(&mut self, package: FilePackage) -> u32 {
+        let package_idx = self.push_file_package(package);
+        self.resource
+            .file_package_lookup
+            .insert(package.path(), package_idx);
+        package_idx
     }
 
     pub fn dump(&self, path: impl AsRef<Utf8Path>) {

@@ -648,11 +648,37 @@ pub struct FilePackage {
     flags: FilePackageFlags,
 }
 
-impl<'a> TableRef<'a, FilePackage> {
+impl FilePackage {
+    pub fn new(
+        path: impl IntoHash,
+        name: impl IntoHash,
+        parent: impl IntoHash,
+        group: u32,
+    ) -> Self {
+        Self {
+            path_and_group: HashWithData::new(path.into_hash(), group),
+            name: Hash::from_hash40(name.into_hash()),
+            parent: Hash::from_hash40(parent.into_hash()),
+            lifetime: Hash::from_hash40(Hash40::const_new("")),
+            info_start: 0,
+            info_count: 0,
+            child_start: 0,
+            child_count: 0,
+            flags: FilePackageFlags::empty(),
+        }
+    }
+
     pub fn path(&self) -> Hash40 {
         self.path_and_group.hash40()
     }
 
+    pub fn set_child_package_range(&mut self, start: u32, count: u32) {
+        self.child_start = start;
+        self.child_count = count;
+    }
+}
+
+impl<'a> TableRef<'a, FilePackage> {
     pub fn data_group(&self) -> TableRef<'a, FileGroup> {
         self.archive()
             .get_file_group(self.path_and_group.data())
@@ -670,6 +696,12 @@ impl<'a> TableRef<'a, FilePackage> {
         } else {
             None
         }
+    }
+
+    pub fn child_packages(&self) -> TableSliceRef<'a, FilePackageChild> {
+        self.archive()
+            .get_file_package_child_slice(self.child_start, self.child_count)
+            .unwrap()
     }
 
     pub fn infos(&self) -> TableSliceRef<'a, FileInfo> {
@@ -690,6 +722,12 @@ impl<'a> TableMut<'a, FilePackage> {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
 pub struct FilePackageChild(HashWithData);
 
+impl FilePackageChild {
+    pub fn new(path: Hash40, index: u32) -> Self {
+        Self(HashWithData::new(path, index))
+    }
+}
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
 pub struct FileGroup {
@@ -702,6 +740,17 @@ pub struct FileGroup {
 }
 
 impl FileGroup {
+    pub fn new_for_new_package() -> Self {
+        Self {
+            archive_offset: [0; 2],
+            decompressed_size: 0x10,
+            compressed_size: 0x10,
+            child_count: 0,
+            child_start: 0,
+            redirection: 0xffffff,
+        }
+    }
+
     pub fn compressed_size(&self) -> u32 {
         self.compressed_size
     }
@@ -757,6 +806,16 @@ pub struct SearchFolder {
 }
 
 impl SearchFolder {
+    pub fn new(path: impl IntoHash, parent: impl IntoHash, name: impl IntoHash) -> Self {
+        Self {
+            path_and_folder_count: HashWithData::new(path.into_hash(), 0x0),
+            parent_and_file_count: HashWithData::new(parent.into_hash(), 0x0),
+            name: Hash::from_hash40(name.into_hash()),
+            first_child_index: u32::MAX,
+            _padding: 0x0,
+        }
+    }
+
     pub fn path(&self) -> Hash40 {
         self.path_and_folder_count.hash40()
     }
@@ -787,6 +846,10 @@ impl SearchFolder {
 
     pub fn set_first_child_index(&mut self, index: u32) {
         self.first_child_index = index;
+    }
+
+    pub fn has_first_child(&self) -> bool {
+        self.first_child_index != u32::MAX
     }
 }
 
@@ -835,6 +898,15 @@ pub struct SearchPath {
 
 impl SearchPath {
     const IS_FOLDER_BIT: u32 = 0x0040_0000;
+
+    pub fn new_folder(path: impl IntoHash, parent: impl IntoHash, name: impl IntoHash) -> Self {
+        Self {
+            path_and_next_index: HashWithData::new(path.into_hash(), 0xFFFFFF),
+            parent_and_is_folder: HashWithData::new(parent.into_hash(), Self::IS_FOLDER_BIT),
+            name: Hash::from_hash40(name.into_hash()),
+            extension: Hash::from_hash40(Hash40::const_new("")),
+        }
+    }
 
     pub fn new(
         path: impl IntoHash,

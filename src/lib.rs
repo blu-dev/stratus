@@ -13,13 +13,13 @@ use std::{
 use camino::Utf8Path;
 use log::LevelFilter;
 use skyline::hooks::InlineCtx;
-use smash_hash::{Hash40, Hash40Map};
+use smash_hash::{Hash40, Hash40Map, Hash40Set};
 
 use crate::{
     archive::{decompress_stream, Archive, ZstdBuffer},
     data::{
-        FileData, FileDescriptor, FileEntity, FileInfo, FileInfoFlags, FileLoadMethod, FilePath,
-        SearchPath, TryFilePathResult,
+        FileData, FileDescriptor, FileEntity, FileGroup, FileInfo, FileInfoFlags, FileLoadMethod,
+        FilePackage, FilePackageChild, FilePath, SearchFolder, SearchPath, TryFilePathResult,
     },
     discover::{FileSystem, NewFile},
     hash_interner::{DisplayHash, HashMemorySlab},
@@ -1072,6 +1072,7 @@ fn initial_loading(_ctx: &InlineCtx) {
             now.elapsed().as_secs_f32()
         );
 
+        let mut new_packages_by_parent: Hash40Map<Hash40Set> = Hash40Map::default();
         let mut new_files_by_package: Hash40Map<Vec<&NewFile>> = Hash40Map::default();
 
         let now = std::time::Instant::now();
@@ -1110,25 +1111,146 @@ fn initial_loading(_ctx: &InlineCtx) {
             }
 
             if let Some(package) = package {
+                let parent_components = components.len() - 1;
+                let mut current_parent = Hash40::const_new("");
+                for component in components.iter().take(parent_components).copied() {
+                    let new_parent = current_parent.const_with(component);
+
+                    if archive.lookup_search_path(new_parent).is_none() {
+                        let search_path = SearchPath::new_folder(
+                            new_parent,
+                            if current_parent == Hash40::const_new("") {
+                                Hash40::const_new("/")
+                            } else {
+                                current_parent.const_trim_trailing("/")
+                            },
+                            component,
+                        );
+
+                        let new_index = archive.insert_search_path(search_path);
+                        let mut parent = archive
+                            .lookup_search_folder_mut(search_path.parent())
+                            .unwrap();
+
+                        let count = parent.folder_count();
+                        parent.set_folder_count(count + 1);
+
+                        if parent.has_first_child() {
+                            let mut child = parent.first_child();
+                            while !child.is_end() {
+                                child = child.next();
+                            }
+
+                            child.set_next_index(new_index);
+                        } else {
+                            parent.set_first_child_index(new_index);
+                        }
+
+                        archive.insert_search_folder(SearchFolder::new(
+                            search_path.path(),
+                            search_path.parent(),
+                            search_path.name(),
+                        ));
+                    }
+
+                    current_parent = new_parent.const_with("/");
+                }
                 let search_path = SearchPath::from_file_path(&file.filepath);
 
                 let new_index = archive.insert_search_path(search_path);
 
-                if let Some(parent) = archive.lookup_search_folder_mut(search_path.parent()) {
+                let mut parent = archive
+                    .lookup_search_folder_mut(search_path.parent())
+                    .unwrap();
+
+                let file_count = parent.file_count();
+                parent.set_file_count(file_count + 1);
+                if parent.has_first_child() {
                     let mut child = parent.first_child();
                     while !child.is_end() {
                         child = child.next();
                     }
 
                     child.set_next_index(new_index);
-                    new_files_by_package.entry(package).or_default().push(&file);
+                } else {
+                    parent.set_first_child_index(new_index);
                 }
+
+                if archive.lookup_file_package(package).is_none() {
+                    if components[0] == "stage"
+                        && components.len() == 6 // stage / <stage> / <battle | normal> / <subfolder> / <new package name> / <file>
+                        && matches!(components[2], "battle" | "normal")
+                    {
+                        let mut parent_hash = Hash40::const_new("");
+                        for component in components.iter().take(4) {
+                            if parent_hash != Hash40::const_new("") {
+                                parent_hash = parent_hash.const_with("/");
+                            }
+                            parent_hash = parent_hash.const_with(*component);
+                        }
+                        println!(
+                            "Adding new package {}, child of {}",
+                            package.display(),
+                            parent_hash.display()
+                        );
+                        new_packages_by_parent
+                            .entry(parent_hash)
+                            .or_default()
+                            .insert(Hash40::const_new(components[4]));
+                    } else {
+                        continue;
+                    }
+                }
+
+                new_files_by_package.entry(package).or_default().push(&file);
             }
         }
+
         println!(
             "[stratus::patching] Built file-addition cache and updated search section in {:.3}s",
             now.elapsed().as_secs_f32()
         );
+
+        for (package_parent, package_names) in new_packages_by_parent {
+            let Some(parent) = archive.lookup_file_package(package_parent) else {
+                continue;
+            };
+
+            let child_package_range = parent.child_packages().range();
+
+            let new_range_start = archive.num_file_package_child() as u32;
+            let new_range_len = (child_package_range.end - child_package_range.start)
+                + (package_names.len() as u32);
+
+            for child_package_idx in child_package_range {
+                let child_package = archive
+                    .get_file_package_child(child_package_idx)
+                    .unwrap()
+                    .clone();
+                archive.push_file_package_child(child_package);
+            }
+
+            for package_name in package_names {
+                let new_group = archive.push_file_group(FileGroup::new_for_new_package());
+
+                let path = package_parent.const_with("/").const_with_hash(package_name);
+                let package = FilePackage::new(path, package_name, package_parent, new_group);
+
+                let new_index = archive.insert_file_package(package);
+                let child = FilePackageChild::new(path, new_index);
+                println!(
+                    "Adding file package child: {:?} to {}",
+                    child,
+                    package_parent.display()
+                );
+                archive.push_file_package_child(child);
+            }
+
+            archive
+                .lookup_file_package_mut(package_parent)
+                .unwrap()
+                .set_child_package_range(new_range_start, new_range_len);
+        }
 
         let now = std::time::Instant::now();
         for (package_hash, files) in new_files_by_package {
@@ -1204,14 +1326,6 @@ fn initial_loading(_ctx: &InlineCtx) {
             "[stratus::patching] Rebuilt archive tables in {:.3}s",
             now.elapsed().as_secs_f32()
         );
-
-        // panic!(
-        //     "{:#x?}",
-        //     archive
-        //         .lookup_file_package("fighter/element/c04")
-        //         .unwrap()
-        //         .data_group()
-        // );
 
         ReadOnlyArchive(archive)
     });
