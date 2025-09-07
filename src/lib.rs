@@ -693,6 +693,9 @@ fn patch_res_threads() {
 
     // observe_decompression
     Patch::in_text(0x3544804).nop().unwrap();
+
+    // Patch::in_text(0x3544e7c).nop().unwrap();
+    // Patch::in_text(0x3544e84).nop().unwrap();
 }
 
 extern "C" {
@@ -725,8 +728,9 @@ fn observe_res_service_inflate(ctx: &InlineCtx) {
         panic!("ResInflateThread handed invalid info index");
     };
     log::info!(
-        "[observe_inflate] Inflating file {} with load method {:#x} (data ptr: {:#x})",
+        "[observe_inflate] Inflating file {} (info: {:#x}) with load method {:#x} (data ptr: {:#x})",
         info.try_file_path().unwrap().path().display(),
+        info.index(),
         unsafe { *res_service.add(0x234).cast::<u32>() },
         ctx.registers[24].x()
     );
@@ -967,6 +971,15 @@ fn initial_loading(_ctx: &InlineCtx) {
                         FileLoadMethod::Owned(0),
                     ));
 
+                    let mut group = archive.get_file_group_mut(data_group_idx).unwrap();
+
+                    // HACK: Some files, when unshared, belong to a data group whose size is zero. ResLoadingThread
+                    // will skip loading that data group if this is the case. Instead, we politely tell it that there
+                    // is actually data to read. This allows the streaming decompressor to work on our files.
+                    if group.compressed_size() == 0 {
+                        group.set_compressed_size(0x10);
+                    }
+
                     let mut first_info = archive
                         .get_file_info_mut(unshare_info.real_infos[0].1)
                         .unwrap();
@@ -1191,6 +1204,14 @@ fn initial_loading(_ctx: &InlineCtx) {
             "[stratus::patching] Rebuilt archive tables in {:.3}s",
             now.elapsed().as_secs_f32()
         );
+
+        // panic!(
+        //     "{:#x?}",
+        //     archive
+        //         .lookup_file_package("fighter/element/c04")
+        //         .unwrap()
+        //         .data_group()
+        // );
 
         ReadOnlyArchive(archive)
     });

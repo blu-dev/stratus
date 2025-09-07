@@ -701,6 +701,16 @@ pub struct FileGroup {
     redirection: u32,
 }
 
+impl FileGroup {
+    pub fn compressed_size(&self) -> u32 {
+        self.compressed_size
+    }
+
+    pub fn set_compressed_size(&mut self, new_size: u32) {
+        self.compressed_size = new_size;
+    }
+}
+
 impl<'a> TableRef<'a, FileGroup> {
     pub fn file_info_slice(&self) -> TableSliceRef<'a, FileInfo> {
         self.archive()
