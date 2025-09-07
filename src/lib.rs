@@ -16,7 +16,7 @@ use skyline::hooks::InlineCtx;
 use smash_hash::{Hash40, Hash40Map};
 
 use crate::{
-    archive::Archive,
+    archive::{decompress_stream, Archive, ZstdBuffer},
     data::{
         FileData, FileDescriptor, FileEntity, FileInfo, FileInfoFlags, FileLoadMethod, FilePath,
         SearchPath, TryFilePathResult,
@@ -316,22 +316,22 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
         TryFilePathResult::Missing => panic!("File info is not pointing to a real file path"),
     };
 
-    if cfg!(feature = "verbose_logging") {
-        let offset_into_read = unsafe { *res_service.add(0x220).cast::<u64>() };
-        let x20 = ctx.registers[20].x();
-        let x21 = ctx.registers[21].x();
-        let target_offset_into_read = x20 + x21;
-        log::info!(
-            "Attempting to load {} with cursor {:#x} | {:#x} | {:#x} | {:#x} ({} / {})",
-            path.display(),
-            offset_into_read,
-            target_offset_into_read,
-            ctx.registers[25].x(),
-            unsafe { *res_service.add(0x234).cast::<u32>() },
-            current_index,
-            unsafe { *res_service.add(0x22C).cast::<u32>() }
-        );
-    }
+    // if cfg!(feature = "verbose_logging") {
+    let offset_into_read = unsafe { *res_service.add(0x220).cast::<u64>() };
+    let x20 = ctx.registers[20].x();
+    let x21 = ctx.registers[21].x();
+    let target_offset_into_read = x20 + x21;
+    log::info!(
+        "Attempting to load {} with cursor {:#x} | {:#x} | {:#x} | {:#x} ({} / {})",
+        path.display(),
+        offset_into_read,
+        target_offset_into_read,
+        ctx.registers[25].x(),
+        unsafe { *res_service.add(0x234).cast::<u32>() },
+        current_index,
+        unsafe { *res_service.add(0x22C).cast::<u32>() }
+    );
+    // }
 
     // SAFETY: This path is only going to be called from the ResInflateThread, so this being a "static" variable is effectively a TLS variable
     if let Some(size) = ReadOnlyFileSystem::file_system()
@@ -654,19 +654,35 @@ fn skip_load_search_tables(ctx: &mut InlineCtx) {
     ctx.registers[0].set_x(ReadOnlyArchive::get().search_data_ptr() as u64);
 }
 
+#[skyline::hook(offset = 0x3544804, inline)]
+fn observe_decompression(ctx: &mut InlineCtx) {
+    let compressor = ctx.registers[0].x();
+    let buffer_out = ctx.registers[1].x() as *mut ZstdBuffer;
+    let buffer_in = ctx.registers[2].x() as *mut ZstdBuffer;
+
+    let before = format!(
+        "[observe_decompression] Decompressing: IN: {:?}, OUT: {:?}",
+        unsafe { &*buffer_in },
+        unsafe { &*buffer_out }
+    );
+    let result = unsafe { decompress_stream(compressor as _, &mut *buffer_out, &mut *buffer_in) };
+    ctx.registers[0].set_x(result as _);
+    log::info!("{before}, RESULT: {:#x}", result);
+}
+
 fn patch_res_threads() {
     use skyline::patching::Patch;
 
     // jemalloc_hook
     Patch::in_text(0x35442e8).nop().unwrap(); // Nops jemalloc_hook
 
-    // skip_load_hook
+    // // skip_load_hook
     Patch::in_text(0x3544338).data(0xB5002103u32).unwrap(); // cbnz x3, #0x420 (replacing b.ls #0x424)
 
-    // skip_load_hook_2
+    // // skip_load_hook_2
     Patch::in_text(0x3544758).data(0xB5001583u32).unwrap(); // cbnz x3, #0x2b0 (replacing ldr x2, [sp, #0x28])
 
-    // process_single_patched_file_request
+    // // process_single_patched_file_request
     Patch::in_text(0x3542f64).data(0xD61F0060u32).unwrap(); // br x3 (replacing mov x2, x21)
 
     // skip_load_resource_tables
@@ -674,6 +690,9 @@ fn patch_res_threads() {
 
     // skip_load_search_tables
     Patch::in_text(0x3750c44).nop().unwrap();
+
+    // observe_decompression
+    Patch::in_text(0x3544804).nop().unwrap();
 }
 
 extern "C" {
@@ -706,49 +725,41 @@ fn observe_res_service_inflate(ctx: &InlineCtx) {
         panic!("ResInflateThread handed invalid info index");
     };
     log::info!(
-        "[observe_inflate] Inflating file {} with load method {:#x}",
+        "[observe_inflate] Inflating file {} with load method {:#x} (data ptr: {:#x})",
         info.try_file_path().unwrap().path().display(),
-        unsafe { *res_service.add(0x234).cast::<u32>() }
+        unsafe { *res_service.add(0x234).cast::<u32>() },
+        ctx.registers[24].x()
     );
 }
 
-#[skyline::main(name = "stratus")]
-pub fn main() {
-    logger::install_hooks();
+#[no_mangle]
+pub extern "C" fn arcrop_is_mod_enabled(_: u64) -> bool {
+    true
+}
 
-    unsafe {
-        set_overclock_enabled(true);
-        set_cpu_boost_mode(1);
-    }
-    let instant = std::time::Instant::now();
-    std::panic::set_hook(Box::new(|info| {
-        let location = info.location().unwrap();
+#[repr(C)]
+pub struct ApiVersion {
+    major: u32,
+    minor: u32,
+}
 
-        let msg = match info.payload().downcast_ref::<&'static str>() {
-            Some(s) => *s,
-            None => match info.payload().downcast_ref::<String>() {
-                Some(s) => &s[..],
-                None => "Box<Any>",
-            },
-        };
+#[no_mangle]
+pub extern "C" fn arcrop_api_version() -> &'static ApiVersion {
+    static VERSION: ApiVersion = ApiVersion { major: 1, minor: 8 };
+    &VERSION
+}
 
-        let err_msg = format!("smashline has panicked: '{}', {}\0", msg, location);
-        skyline::error::show_error(
-                        69,
-                        "Smashline has panicked! Please open Details and post an issue at https://github.com/HDR-Development/smashline.\0",
-                        err_msg.as_str(),
-                    );
-    }));
-    init_folder();
-    init_hashes();
-    patch_res_threads();
-    let _ = log::set_logger(Box::leak(Box::new(NxKernelLogger::new())));
-    unsafe { log::set_max_level_racy(LevelFilter::Info) };
+#[no_mangle]
+pub extern "C" fn arcrop_require_api_version(_major: u32, _minor: u32) {}
 
+#[global_allocator]
+static ALLOC: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
+
+#[skyline::hook(offset = 0x3750b8c, inline)]
+fn initial_loading(_ctx: &InlineCtx) {
     ARCHIVE.get_or_init(|| {
-        let mut file = File::open("rom:/data.arc").unwrap();
         let now = std::time::Instant::now();
-        let mut archive = archive::Archive::read(&mut file);
+        let mut archive = archive::Archive::open();
 
         println!(
             "[stratus::patching] Loaded archive tables in {:.3}s",
@@ -768,42 +779,11 @@ pub fn main() {
 
         let mut unshare_cache = Hash40Map::default();
         let mut reverse_unshare_cache: HashMap<u32, ReshareFileInfo> = HashMap::default();
-        let mut rename_cache = HashSet::new();
         let mut unshare_secondary_cache: HashMap<u32, Vec<u32>> = HashMap::default();
-
-        let now = std::time::Instant::now();
-
-        for package in archive.iter_file_package() {
-            if let Some(group) = package.file_group() {
-                for info in group.file_info_slice() {
-                    if info.entity().info().index() != info.index() {
-                        // log::info!(
-                        //     "Secondary Unshare: {} ({:#x})",
-                        //     info.file_path().path().display(),
-                        //     info.index()
-                        // );
-
-                        unshare_secondary_cache
-                            .entry(info.file_path().index())
-                            .or_default()
-                            .push(info.index());
-                    }
-                }
-            }
-        }
-        println!(
-            "[stratus::patching] Built unshare-secondary cache in {:.3}s",
-            now.elapsed().as_secs_f32()
-        );
 
         let now = std::time::Instant::now();
         for package_idx in 0..archive.num_file_package() {
             let package = archive.get_file_package(package_idx as u32).unwrap();
-            // if package.path() == Hash40::const_new("fighter/jack/result/c07")
-            //     || package.path() == Hash40::const_new("fighter/jack/append/c07")
-            // {
-            //     continue;
-            // }
             let infos = package.infos();
             for idx in 0..infos.len() {
                 let info = infos.get_local(idx).unwrap();
@@ -829,7 +809,7 @@ pub fn main() {
                     // date we will do it that way
                     if info.file_path().index() == shared_info.file_path().index() {
                         if shared_info.desc().load_method().is_skip() {
-                            rename_cache.insert(shared_info.index());
+                            // rename_cache.insert(shared_info.index());
                         } else {
                             // Skip unsharing since this file should continue to be shared to itself
                             continue;
@@ -856,27 +836,64 @@ pub fn main() {
         );
 
         let now = std::time::Instant::now();
-        for file in rename_cache {
-            let mut info = archive.get_file_info_mut(file).unwrap();
-            let file_path = info.path_ref().clone();
-            let new_fp_idx = info.archive_mut().insert_file_path(FilePath::from_parts(
-                file_path.path().const_with(".reshared"),
-                file_path.parent(),
-                file_path.file_name(),
-                file_path.extension(),
-                file_path.path_and_entity.data(),
-            ));
+        let mut renamed = HashMap::new();
+        let mut managed_groups = HashSet::new();
+        for package_idx in 0..archive.num_file_package() as u32 {
+            let package = archive.get_file_package(package_idx).unwrap();
+            if let Some(group) = package.file_group() {
+                if !managed_groups.insert(group.index()) {
+                    continue;
+                }
+                let info_range = group.file_info_slice().range();
+                for info_idx in info_range {
+                    let mut info = archive.get_file_info_mut(info_idx).unwrap();
+                    let path_idx = info.path_ref().index();
+                    let new_fp_idx = if let Some(new_idx) = renamed.get(&path_idx) {
+                        *new_idx
+                    } else {
+                        let file_path = info.path_ref().clone();
 
-            println!(
-                "Processing {} ({:#x?})",
-                file_path.path().display(),
-                info.desc_ref().load_method() // original_info.display()
-            );
-            info.set_path(new_fp_idx);
-            info.set_as_reshared();
-            info.desc()
-                .set_load_method(FileLoadMethod::PackageSkip(file));
+                        let new_idx = info.archive_mut().insert_file_path(FilePath::from_parts(
+                            file_path.path().const_with(".reshared"),
+                            file_path.parent(),
+                            file_path.file_name(),
+                            file_path.extension(),
+                            file_path.path_and_entity.data(),
+                        ));
+
+                        renamed.insert(path_idx, new_idx);
+                        new_idx
+                    };
+
+                    info.set_path(new_fp_idx);
+                    info.set_as_reshared();
+                    info.desc()
+                        .set_load_method(FileLoadMethod::PackageSkip(info_idx));
+                }
+            }
         }
+        // for file in rename_cache {
+        //     let mut info = archive.get_file_info_mut(file).unwrap();
+        //     let file_path = info.path_ref().clone();
+
+        //     let new_fp_idx = info.archive_mut().insert_file_path(FilePath::from_parts(
+        //         file_path.path().const_with(".reshared"),
+        //         file_path.parent(),
+        //         file_path.file_name(),
+        //         file_path.extension(),
+        //         file_path.path_and_entity.data(),
+        //     ));
+
+        //     println!(
+        //         "Processing {} ({:#x?})",
+        //         file_path.path().display(),
+        //         info.desc_ref().load_method() // original_info.display()
+        //     );
+        //     info.set_path(new_fp_idx);
+        //     info.set_as_reshared();
+        //     info.desc()
+        //         .set_load_method(FileLoadMethod::PackageSkip(file));
+        // }
         println!(
             "[stratus::patching] Renamed group-shared files in {:.3}s",
             now.elapsed().as_secs_f32()
@@ -888,10 +905,6 @@ pub fn main() {
                 let path_hash = path.path_and_entity.hash40();
 
                 if let Some(unshare_info) = unshare_cache.get(&path_hash) {
-                    // let mut info = path
-                    //     .into_archive_mut()
-                    //     .get_file_info_mut(unshare_info.real_info_index)
-                    //     .unwrap();
                     let source_path = archive
                         .get_file_info(unshare_info.real_infos[0].1)
                         .unwrap()
@@ -901,6 +914,19 @@ pub fn main() {
                         .try_file_path()
                         .unwrap()
                         .path();
+
+                    if archive
+                        .get_file_info(unshare_info.real_infos[0].1)
+                        .unwrap()
+                        .flags()
+                        .intersects(FileInfoFlags::IS_REGIONAL | FileInfoFlags::IS_LOCALIZED)
+                    {
+                        log::info!(
+                            "Skipping {} because it is localized/regional",
+                            path_hash.display()
+                        );
+                        continue;
+                    }
 
                     log::info!(
                         "Unsharing {} from {}",
@@ -931,12 +957,6 @@ pub fn main() {
                         .data_group()
                         .index();
 
-                    // let mut desc = info.desc_ref().clone();
-                    // desc.set_data(new_data_idx);
-                    // desc.set_group(data_group_idx);
-                    // desc.set_load_method(FileLoadMethod::Owned(0));
-                    //
-
                     let new_entity_idx = archive.push_file_entity(FileEntity::new(
                         unshare_info.package_index,
                         unshare_info.real_infos[0].1,
@@ -950,10 +970,10 @@ pub fn main() {
                     let mut first_info = archive
                         .get_file_info_mut(unshare_info.real_infos[0].1)
                         .unwrap();
-                    let flags = first_info.flags();
-                    first_info.set_flags(
-                        flags & !(FileInfoFlags::IS_SHARED | FileInfoFlags::IS_UNKNOWN_FLAG),
-                    );
+                    let mut flags = first_info.flags();
+                    flags.set(FileInfoFlags::IS_SHARED, false);
+                    flags.set(FileInfoFlags::IS_UNKNOWN_FLAG, false);
+                    first_info.set_flags(flags);
                     first_info.set_entity(new_entity_idx);
                     first_info.set_desc(new_desc_idx);
                     first_info.path_mut().set_entity(new_entity_idx);
@@ -962,6 +982,10 @@ pub fn main() {
                         let archive = first_info.archive_mut();
                         let mut info = archive.get_file_info_mut(*info).unwrap();
                         info.set_entity(new_entity_idx);
+                        let mut flags = info.flags();
+                        flags.set(FileInfoFlags::IS_SHARED, true);
+                        flags.set(FileInfoFlags::IS_UNKNOWN_FLAG, true);
+                        info.set_flags(flags);
                         info.desc_mut()
                             .set_load_method(FileLoadMethod::Unowned(new_entity_idx));
                     }
@@ -976,9 +1000,6 @@ pub fn main() {
                         let archive = first_info.into_archive_mut();
                         for secondary in secondary {
                             let mut secondary_info = archive.get_file_info_mut(secondary).unwrap();
-                            // let mut flags = secondary_info.flags();
-                            // flags.set(FileInfoFlags::IS_SHARED, false);
-                            // flags.set(FileInfoFlags::IS_UNKNOWN_FLAG, false);
                             secondary_info.set_entity(new_entity_idx);
                         }
                     }
@@ -1173,20 +1194,54 @@ pub fn main() {
 
         ReadOnlyArchive(archive)
     });
+}
+
+#[skyline::main(name = "stratus")]
+pub fn main() {
+    std::panic::set_hook(Box::new(|info| {
+        let location = info.location().unwrap();
+
+        let msg = match info.payload().downcast_ref::<&'static str>() {
+            Some(s) => *s,
+            None => match info.payload().downcast_ref::<String>() {
+                Some(s) => &s[..],
+                None => "Box<Any>",
+            },
+        };
+
+        let err_msg = format!("smashline has panicked: '{}', {}\0", msg, location);
+        skyline::error::show_error(
+            69,
+            "Smashline has panicked! Please open Details and post an issue at https://github.com/HDR-Development/smashline.\0",
+            err_msg.as_str(),
+        );
+    }));
+
+    logger::install_hooks();
 
     unsafe {
-        // set_overclock_enabled(false);
-        set_cpu_boost_mode(0);
+        set_overclock_enabled(true);
+        set_cpu_boost_mode(1);
     }
 
-    // panic!("Booted in {}s", instant.elapsed().as_secs_f32());
+    init_folder();
+    init_hashes();
+    patch_res_threads();
+    let _ = log::set_logger(Box::leak(Box::new(NxKernelLogger::new())));
+    unsafe { log::set_max_level_racy(LevelFilter::Info) };
+
+    unsafe {
+        set_cpu_boost_mode(0);
+    }
 
     skyline::install_hooks!(
         skip_load_resource_tables,
         skip_load_search_tables,
+        initial_loading,
         jemalloc_hook,
         skip_load_hook,
         skip_load_hook_p2,
+        observe_decompression,
         observe_res_service_inflate,
         process_single_patched_file_request,
         loading_thread_assign_patched_pointer,

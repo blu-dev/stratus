@@ -41,14 +41,14 @@ fn discover_and_update_recursive(
     }
 }
 
-struct NnsdkFile {
+pub struct NnsdkFile {
     handle: skyline::nn::fs::FileHandle,
     offset: usize,
     len: usize,
 }
 
 impl NnsdkFile {
-    fn open(path: &Utf8Path) -> Self {
+    pub fn open(path: &Utf8Path) -> Self {
         let mut handle = skyline::nn::fs::FileHandle { handle: 0 };
         let mut file_size = 0i64;
         let path = format!("{path}\0");
@@ -115,6 +115,7 @@ impl std::io::Read for NnsdkFile {
                 ) == 0x0
             );
         }
+        self.offset += out_size as usize;
         Ok(out_size as usize)
     }
 }
@@ -204,6 +205,10 @@ impl FileSystem {
                 flate2::bufread::DeflateDecoder::new(std::io::Cursor::new(slice))
                     .read_exact(buffer)
                     .unwrap();
+
+                unsafe {
+                    std::alloc::dealloc(compressed_buffer, layout);
+                }
                 // file.read_exact(buffer).unwrap();
                 // if count != buffer.len() {
                 //     panic!(
