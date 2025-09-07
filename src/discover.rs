@@ -46,8 +46,10 @@ pub struct DiscoveredFile {
 impl DiscoveredFile {
     pub fn compressed_size(&self) -> Option<u32> {
         match &self.file {
-            LoadableFile::ZipFile { wayfinder, .. } => Some(wayfinder.compressed_size_hint() as u32),
-            _ => None
+            LoadableFile::ZipFile { wayfinder, .. } => {
+                Some(wayfinder.compressed_size_hint() as u32)
+            }
+            _ => None,
         }
     }
 
@@ -99,12 +101,21 @@ impl FileSystem {
         let Some(file) = self.files.get(&hash) else {
             return false;
         };
-        let _ = write!(buffer, "{}/{}", self.roots[file.root_idx as usize], hash.display());
+        let _ = write!(
+            buffer,
+            "{}/{}",
+            self.roots[file.root_idx as usize],
+            hash.display()
+        );
 
         true
     }
 
-    pub fn decompress_loaded_file(file: &DiscoveredFile, pointer: NonNull<u8>) -> NonNull<u8> {
+    pub fn decompress_loaded_file(
+        file: &DiscoveredFile,
+        pointer: NonNull<u8>,
+        alignment: usize,
+    ) -> NonNull<u8> {
         // Check if the uppermost bit is set in the pointer, if it is then we it's compressed and
         // we need to decompress it. This should also cause a memory access violation and crash if
         // we fail to decompress it before providing it to the game.
@@ -112,50 +123,53 @@ impl FileSystem {
             // TODO: Move this out of unwrap
             let compressed_size = file.compressed_size().unwrap();
 
-            let compressed_buffer = unsafe {
-                std::slice::from_raw_parts(real_ptr, compressed_size as usize)
-            };
+            let compressed_buffer =
+                unsafe { std::slice::from_raw_parts(real_ptr, compressed_size as usize) };
 
-            let decompressed_buffer_layout = unsafe {
-                // TODO: We default to page alignment here but we could probably be more optimal
-                std::alloc::Layout::from_size_align_unchecked(file.size as usize, 0x1000)
-            };
+            let decompressed_buffer_layout =
+                std::alloc::Layout::from_size_align(file.size as usize, alignment).unwrap();
 
-            let decompressed_ptr = unsafe {
-                std::alloc::alloc(decompressed_buffer_layout)
-            };
+            let decompressed_ptr = unsafe { std::alloc::alloc(decompressed_buffer_layout) };
 
             let decompressed_buffer = unsafe {
                 std::slice::from_raw_parts_mut(decompressed_ptr, decompressed_buffer_layout.size())
             };
 
             // TODO: figure out removing unwrap, or don't this is technically user data
-            flate2::bufread::DeflateDecoder::new(std::io::Cursor::new(compressed_buffer)).read_exact(decompressed_buffer).unwrap();
+            flate2::bufread::DeflateDecoder::new(std::io::Cursor::new(compressed_buffer))
+                .read_exact(decompressed_buffer)
+                .unwrap();
 
             unsafe {
-                std::alloc::dealloc(real_ptr, std::alloc::Layout::from_size_align_unchecked(compressed_size as usize, 0x1));
+                std::alloc::dealloc(
+                    real_ptr,
+                    std::alloc::Layout::from_size_align_unchecked(compressed_size as usize, 0x1),
+                );
             }
 
-            unsafe {
-                NonNull::new_unchecked(decompressed_ptr)
-            }
+            unsafe { NonNull::new_unchecked(decompressed_ptr) }
         } else {
             pointer
         }
     }
 
-    fn load_zip_file(zip: &rawzip::ZipArchive<rawzip::FileReader>, wayfinder: rawzip::ZipArchiveEntryWayfinder) -> NonNull<u8> {
+    fn load_zip_file(
+        zip: &rawzip::ZipArchive<rawzip::FileReader>,
+        wayfinder: rawzip::ZipArchiveEntryWayfinder,
+    ) -> NonNull<u8> {
         // SAFETY: Compressed size must be <= u32::MAX, and if it's not then we are going
         // to OOM anyways. Realistically I don't think a user is going to do that so I
         // won't bother doing the unwrap panic check here (and if they do the worst that
         // happens is that their game crashes)
-        let buffer_layout = unsafe { std::alloc::Layout::from_size_align(wayfinder.compressed_size_hint() as usize, 0x1).unwrap_unchecked() };
+        let buffer_layout = unsafe {
+            std::alloc::Layout::from_size_align(wayfinder.compressed_size_hint() as usize, 0x1)
+                .unwrap_unchecked()
+        };
         let compressed_buffer = unsafe { std::alloc::alloc(buffer_layout) };
         assert!(!compressed_buffer.is_null());
 
-        let slice = unsafe {
-            std::slice::from_raw_parts_mut(compressed_buffer, buffer_layout.size())
-        };
+        let slice =
+            unsafe { std::slice::from_raw_parts_mut(compressed_buffer, buffer_layout.size()) };
 
         // TODO: Check if this can be unwrap_unchecked?
         let file = zip.get_entry(wayfinder).unwrap();
@@ -171,7 +185,14 @@ impl FileSystem {
     /// one that needs to do the decompression. In practice, this means that `ResLoadingThread`
     /// will leave the file compressed while `ResInflateThread` will either do the decompression
     /// after receiving the pointer, or it will decompress it while loading
-    pub fn load_file(&self, hash: Hash40, file: &DiscoveredFile, filepath_buffer: &mut String, leave_compressed: bool) -> NonNull<u8> {
+    pub fn load_file(
+        &self,
+        hash: Hash40,
+        file: &DiscoveredFile,
+        filepath_buffer: &mut String,
+        alignment: usize,
+        leave_compressed: bool,
+    ) -> NonNull<u8> {
         match &file.file {
             LoadableFile::UncompressedOnDisk => {
                 // TODO: Assert?
@@ -179,25 +200,23 @@ impl FileSystem {
 
                 let size = file.size();
                 let buffer_ptr = unsafe {
-                    std::alloc::alloc(Layout::from_size_align_unchecked(size as usize, 0x1000))
+                    std::alloc::alloc(Layout::from_size_align(size as usize, alignment).unwrap())
                 };
                 assert!(!buffer_ptr.is_null());
 
-                let buffer = unsafe {
-                    std::slice::from_raw_parts_mut(buffer_ptr, size as usize)
-                };
+                let buffer = unsafe { std::slice::from_raw_parts_mut(buffer_ptr, size as usize) };
 
                 let mut file = std::fs::File::open(filepath_buffer).unwrap();
                 file.read_exact(buffer).unwrap();
 
                 unsafe { NonNull::new_unchecked(buffer_ptr) }
-            },
+            }
             LoadableFile::ZipFile { zip, wayfinder } => {
                 let ptr = Self::load_zip_file(zip, *wayfinder);
                 if leave_compressed {
                     ptr
                 } else {
-                    Self::decompress_loaded_file(file, ptr)
+                    Self::decompress_loaded_file(file, ptr, alignment)
                 }
             }
         }
@@ -212,7 +231,7 @@ pub enum LoadableFile {
     UncompressedOnDisk,
     ZipFile {
         zip: &'static rawzip::ZipArchive<rawzip::FileReader>,
-        wayfinder: rawzip::ZipArchiveEntryWayfinder
+        wayfinder: rawzip::ZipArchiveEntryWayfinder,
     },
 }
 
@@ -237,9 +256,7 @@ pub fn discover_and_update_hashes(
         let now = std::time::Instant::now();
         if root.file_type().unwrap().is_dir() {
             let root_idx: u32 = file_system.roots.len().try_into().unwrap();
-            file_system
-                .roots
-                .push(root.path().to_path_buf());
+            file_system.roots.push(root.path().to_path_buf());
             discover_and_update_recursive(
                 root.path(),
                 root.path(),
@@ -277,7 +294,8 @@ pub fn discover_and_update_hashes(
             )
             .unwrap();
 
-            let archive: &'static rawzip::ZipArchive<rawzip::FileReader> = Box::leak(Box::new(archive));
+            let archive: &'static rawzip::ZipArchive<rawzip::FileReader> =
+                Box::leak(Box::new(archive));
 
             file_system.files.reserve(archive.entries_hint() as usize);
 
@@ -313,7 +331,7 @@ pub fn discover_and_update_hashes(
                         file: LoadableFile::ZipFile {
                             zip: archive,
                             wayfinder: entry.wayfinder(),
-                        }
+                        },
                     },
                 );
             }

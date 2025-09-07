@@ -1,8 +1,12 @@
 use std::{
-    alloc::Layout, collections::{HashMap, HashSet}, ops::Deref, ptr::NonNull, sync::{
+    collections::{HashMap, HashSet},
+    ops::Deref,
+    ptr::NonNull,
+    sync::{
         atomic::{AtomicBool, Ordering},
         OnceLock,
-    }, time::Instant
+    },
+    time::Instant,
 };
 
 use camino::Utf8Path;
@@ -316,25 +320,26 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
         TryFilePathResult::Missing => panic!("File info is not pointing to a real file path"),
     };
 
-    // if cfg!(feature = "verbose_logging") {
-    let offset_into_read = unsafe { *res_service.add(0x220).cast::<u64>() };
-    let x20 = ctx.registers[20].x();
-    let x21 = ctx.registers[21].x();
-    let target_offset_into_read = x20 + x21;
-    // log::info!(
-    //     "Attempting to load {} with cursor {:#x} | {:#x} | {:#x} | {:#x} ({} / {})",
-    //     path.display(),
-    //     offset_into_read,
-    //     target_offset_into_read,
-    //     ctx.registers[25].x(),
-    //     unsafe { *res_service.add(0x234).cast::<u32>() },
-    //     current_index,
-    //     unsafe { *res_service.add(0x22C).cast::<u32>() }
-    // );
-    // }
+    if cfg!(feature = "verbose_logging") {
+        let offset_into_read = unsafe { *res_service.add(0x220).cast::<u64>() };
+        let x20 = ctx.registers[20].x();
+        let x21 = ctx.registers[21].x();
+        let target_offset_into_read = x20 + x21;
+        log::info!(
+            "Attempting to load {} with cursor {:#x} | {:#x} | {:#x} | {:#x} ({} / {})",
+            path.display(),
+            offset_into_read,
+            target_offset_into_read,
+            ctx.registers[25].x(),
+            unsafe { *res_service.add(0x234).cast::<u32>() },
+            current_index,
+            unsafe { *res_service.add(0x22C).cast::<u32>() }
+        );
+    }
 
     // SAFETY: This path is only going to be called from the ResInflateThread, so this being a "static" variable is effectively a TLS variable
-    if let Some(file) = ReadOnlyFileSystem::file_system().get_file(path)
+    if let Some(file) = ReadOnlyFileSystem::file_system()
+        .get_file(path)
         .filter(|_| {
             !info
                 .flags()
@@ -352,34 +357,22 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
         // and don't need to repeat the file IO here. The data_ptr should get replaced the next time that the game needs to load
         // something so we don't need to worry about other file loads reading from that pointer
         if unsafe { *res_service.add(0x234).cast::<u32>() == 0x4 } {
-            ptr = FileSystem::decompress_loaded_file(file, unsafe { NonNull::new_unchecked(*res_service.add(0x218).cast::<*mut u8>()) }).as_ptr();
-            log::info!("[jemalloc_hook] Taking loaded file pointer from ResLoadingThread (single file replacement) {ptr:p}");
+            ptr = FileSystem::decompress_loaded_file(
+                file,
+                unsafe { NonNull::new_unchecked(*res_service.add(0x218).cast::<*mut u8>()) },
+                alignment as usize,
+            )
+            .as_ptr();
         } else {
-            // // SAFETY: we check the null-ness of the pointer after allocation
-            // let buffer = unsafe {
-            //     // SAFETY: We use unchecked here because the alignment comes from the game. It appears to either be 0x10 or 0x1000, both of which are powers
-            //     //  of two, so I'm not concerned about the alignment being off.
-            //     std::alloc::alloc(
-            //         Layout::from_size_align(size as usize, alignment as usize).unwrap(),
-            //     )
-            // };
-            //
-            // assert!(!buffer.is_null());
-            // assert!(buffer as u64 % alignment == 0x00);
-            //
-            // // SAFETY: we assert that the slice is non-null, it's also allocated to the correct length and alignment above
-            // let slice = unsafe { std::slice::from_raw_parts_mut(buffer, size as usize) };
-            //
-            // ReadOnlyFileSystem::file_system().load_into_buffer(path, unsafe { &BUFFER }, slice);
-
-            // // SAFETY: See above
-            // let mut file = std::fs::File::open(unsafe { &BUFFER }).unwrap();
-            // let amount_read = file.read(slice).unwrap();
-
-            // assert_eq!(amount_read, size as usize);
-
-            ptr = ReadOnlyFileSystem::file_system().load_file(path, file, unsafe { &mut BUFFER }, false).as_ptr();
-            log::info!("[jemalloc_hook] Setting pointer to {ptr:p}");
+            ptr = ReadOnlyFileSystem::file_system()
+                .load_file(
+                    path,
+                    file,
+                    unsafe { &mut BUFFER },
+                    alignment as usize,
+                    false,
+                )
+                .as_ptr();
 
             // We need to manually handle the IO swap mechanism here. The game will "correct" the IO swaps on the next file but either
             // I'm misunderstanding something (likely) or that codepath is actually bugged for what it's supposed to do. So instead
@@ -564,35 +557,17 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
         // if they are loaded via any other load method, or as part of a package/group, they don't advance the buffer cursor
         // at all
 
-        // // TODO: Change the definition of FileInfoFlags to remove IS_REGULAR_FILE and IS_GRAPHICS_ARCHIVE,
-        // //      the lower 15 bits are used for buffer alignment
-        // let buffer_alignment = info.flags().bits() & 0x7FFF;
-        //
-        // // This is only a sanity check to make sure that the above knowledge is true
-        // #[cfg(any(debug_assertions, feature = "sanity_checks"))]
-        // {
-        //     assert!(buffer_alignment.is_power_of_two());
-        // }
-        //
-        // // TODO: Remove unwrap
-        // let buffer = unsafe {
-        //     std::alloc::alloc(
-        //         Layout::from_size_align(size as usize, buffer_alignment as usize).unwrap(),
-        //     )
-        // };
-        //
-        // assert!(!buffer.is_null());
-        //
-        // // Allocator should confirm this for us but I don't want any bugs cropping up because of it
-        // #[cfg(any(debug_assertions, feature = "sanity_checks"))]
-        // {
-        //     assert_eq!(buffer as u64 % buffer_alignment as u64, 0x0);
-        // }
-        //
-        // // SAFETY: We assert on the alignment of the slice, the length we just have to trust the allocator
-        // let slice = unsafe { std::slice::from_raw_parts_mut(buffer, size as usize) };
+        // TODO: Change the definition of FileInfoFlags to remove IS_REGULAR_FILE and IS_GRAPHICS_ARCHIVE,
+        //      the lower 15 bits are used for buffer alignment
+        let buffer_alignment = info.flags().bits() & 0x7FFF;
 
-        let ptr = ReadOnlyFileSystem::file_system().load_file(path, file, unsafe { &mut BUFFER }, true);
+        let ptr = ReadOnlyFileSystem::file_system().load_file(
+            path,
+            file,
+            unsafe { &mut BUFFER },
+            buffer_alignment as usize,
+            true,
+        );
 
         // SAFETY: See above
         // let mut file = std::fs::File::open(unsafe { &BUFFER }).unwrap();
@@ -614,7 +589,11 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
 
         // SAFETY: We need to track this pointer down a little bit when we hand it over to ResInflateThread. Storing it in a static mut is fine
         // as long as we only reference it from code that runs inside of this loading thread.
-        unsafe { assert!(LOADING_THREAD_PATCHED_POINTER.replace(ptr.as_ptr()).is_none()) };
+        unsafe {
+            assert!(LOADING_THREAD_PATCHED_POINTER
+                .replace(ptr.as_ptr())
+                .is_none())
+        };
     } else {
         // OUT VARIABLES: This is the vanilla codepath, so we need to set the pointer to the instruction we want to jump to
         //  as well as simulate the instruction that we replaced (mov x2, x21)

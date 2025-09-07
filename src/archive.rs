@@ -121,7 +121,6 @@ pub struct SearchTables {
     search_path_lookup: IndexLookup,
     search_path_link: Table<SearchPathLink>,
     search_path: Table<SearchPath>,
-    path_link_real_count: u32,
 }
 
 pub struct ResourceTables {
@@ -213,11 +212,14 @@ impl SearchTables {
         let search_path_lookup = fetch!(IndexLookup, header.path_link_count);
         let search_path_link = fetch!(Table<SearchPathLink>, header.path_link_count);
         let search_path = fetch!(Table<SearchPath>, header.path_count);
-        let path_link_real_count = search_path_link
-            .iter()
-            .find(|(_, link)| link.is_invalid())
-            .map(|(idx, _)| idx)
-            .unwrap_or(search_path_link.len() as u32);
+
+        // Commented out for now, but the search tables have lots of dummy entries
+        // that we could use to prevent reallocating them if all we are doing is adding files
+        // let path_link_real_count = search_path_link
+        //     .iter()
+        //     .find(|(_, link)| link.is_invalid())
+        //     .map(|(idx, _)| idx)
+        //     .unwrap_or(search_path_link.len() as u32);
 
         Self {
             raw: bytes,
@@ -227,7 +229,6 @@ impl SearchTables {
             search_path_lookup,
             search_path_link,
             search_path,
-            path_link_real_count,
         }
     }
 }
@@ -522,7 +523,10 @@ impl Archive {
 
     pub fn insert_search_path(&mut self, path: SearchPath) -> u32 {
         let index = self.search.search_path.push(path);
-        let link_index = self.search.search_path_link.push(SearchPathLink::new(index));
+        let link_index = self
+            .search
+            .search_path_link
+            .push(SearchPathLink::new(index));
 
         self.search
             .search_path_lookup
