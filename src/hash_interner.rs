@@ -5,7 +5,6 @@ use std::{
     ops::Range,
 };
 
-use bytemuck::{Pod, Zeroable};
 use camino::Utf8Path;
 use smash_hash::{Hash40, Hash40Map};
 
@@ -20,31 +19,19 @@ impl u24 {
     #[rustfmt::skip]
     pub const fn to_u32(self) -> u32 {
         let Self([a, b, c]) = self;
-        #[cfg(target_endian = "big")]
-        { u32::from_be_bytes([0, a, b, c]) }
-        #[cfg(target_endian = "little")]
-        { u32::from_le_bytes([a, b, c, 0]) }
+        u32::from_le_bytes([a, b, c, 0])
     }
 
     pub const fn from_u32(n: u32) -> Self {
-        #[cfg(target_endian = "big")]
-        {
-            let [a, b, c, d] = n.to_be_bytes();
-            assert!(a == 0);
-            Self([b, c, d])
-        }
-        #[cfg(target_endian = "little")]
-        {
-            let [a, b, c, d] = n.to_le_bytes();
-            assert!(d == 0);
-            Self([a, b, c])
-        }
+        let [a, b, c, d] = n.to_le_bytes();
+        assert!(d == 0);
+        Self([a, b, c])
     }
 }
 
 impl Debug for u24 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        <u32 as Debug>::fmt(&&self.to_u32(), f)
+        <u32 as Debug>::fmt(&self.to_u32(), f)
     }
 }
 
@@ -111,6 +98,7 @@ impl SmolRange {
         u24::from_u32(self.0 & 0x00FFFFFF)
     }
 
+    #[allow(dead_code)]
     pub fn range(&self) -> Range<u32> {
         self.start().to_u32()..self.start().to_u32() + self.len() as u32
     }
@@ -207,6 +195,7 @@ impl Display for MemoryUsageReport {
     }
 }
 
+#[allow(dead_code)]
 pub struct InternPathResult {
     pub range: SmolRange,
     pub is_new: bool,
@@ -321,6 +310,7 @@ impl HashMemorySlab {
         cache
     }
 
+    #[allow(dead_code)]
     pub fn report(&self) -> MemoryUsageReport {
         MemoryUsageReport {
             total_blob_size: self.total_blob_size,
@@ -428,8 +418,6 @@ impl HashMemorySlab {
         }
 
         let mut parent_hash = Hash40::const_new(current.as_str());
-        let mut current_dbg = current.as_str().to_string();
-
         for component in path.strip_prefix(current).unwrap().components() {
             len += 1;
             let hash = Hash40::const_new(component.as_str());
@@ -456,10 +444,8 @@ impl HashMemorySlab {
 
             if parent_hash != Hash40::const_new("") {
                 parent_hash = parent_hash.const_with("/");
-                current_dbg.push_str("/");
             }
             parent_hash = parent_hash.const_with(component.as_str());
-            current_dbg.push_str(component.as_str());
 
             let range = SmolRange::new(len, range_start);
 
@@ -485,7 +471,7 @@ impl HashMemorySlab {
         }
     }
 
-    pub fn finalize(&mut self, cache: InternerCache) {
+    pub fn finalize(&mut self, _cache: InternerCache) {
         let fix_indices = unsafe {
             (&*self.components)[..self.component_len]
                 .iter()
@@ -635,7 +621,7 @@ impl<'a> Iterator for ComponentIter<'a> {
 
             if let Some(next) = nested.next() {
                 self.nested = Some(Box::new(nested));
-                return Some(next);
+                Some(next)
             } else {
                 unimplemented!("Interned component with no length?");
             }
@@ -644,7 +630,7 @@ impl<'a> Iterator for ComponentIter<'a> {
             let byte_start = string.start().to_u32() as usize;
             let bytes =
                 unsafe { &(&*self.slab.bytes)[byte_start..byte_start + string.len() as usize] };
-            return Some(unsafe { std::str::from_utf8_unchecked(bytes) });
+            Some(unsafe { std::str::from_utf8_unchecked(bytes) })
         }
     }
 }

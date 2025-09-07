@@ -469,7 +469,7 @@ impl<'a> TableMut<'a, FileInfo> {
             self.desc
         };
 
-        self.archive().get_file_desc(self.desc).unwrap()
+        self.archive().get_file_desc(index).unwrap()
     }
 
     pub fn desc_mut(&mut self) -> TableMut<'_, FileDescriptor> {
@@ -1021,7 +1021,7 @@ impl<'a> TableMut<'a, SearchPath> {
         self.archive_mut().lookup_search_folder_mut(path).unwrap()
     }
 
-    pub fn as_folder(self) -> TableMut<'a, SearchFolder> {
+    pub fn into_folder(self) -> TableMut<'a, SearchFolder> {
         assert!(self.is_folder());
         let path = self.path();
         self.into_archive_mut()

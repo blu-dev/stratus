@@ -1,7 +1,6 @@
 use std::{
     alloc::Layout,
     collections::{HashMap, HashSet},
-    fs::File,
     ops::Deref,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -27,13 +26,18 @@ use crate::{
 };
 
 mod archive;
+
+#[allow(dead_code)]
 mod containers;
+
+#[allow(dead_code)]
 mod data;
+
 mod discover;
 mod hash_interner;
 mod logger;
 
-const STRATUS_FOLDER: &'static str = "sd:/ultimate/stratus/";
+const STRATUS_FOLDER: &str = "sd:/ultimate/stratus/";
 
 fn init_folder() {
     let path = Utf8Path::new(STRATUS_FOLDER);
@@ -258,9 +262,9 @@ fn handle_inflate_io_swaps(ctx: &mut InlineCtx) {
             }
 
             x22 = unsafe { *res_service.add(0x218).cast::<u64>() };
-            x25 = x25 - threshold;
-            x20 = x20 + threshold;
-            x21 = x21 - threshold;
+            x25 -= threshold;
+            x20 += threshold;
+            x21 -= threshold;
             threshold =
                 target_offset_into_read.min(unsafe { *res_service.add(0x220).cast::<u64>() }) - x21;
         }
@@ -693,9 +697,6 @@ fn patch_res_threads() {
 
     // observe_decompression
     Patch::in_text(0x3544804).nop().unwrap();
-
-    // Patch::in_text(0x3544e7c).nop().unwrap();
-    // Patch::in_text(0x3544e84).nop().unwrap();
 }
 
 extern "C" {
@@ -855,7 +856,7 @@ fn initial_loading(_ctx: &InlineCtx) {
                     let new_fp_idx = if let Some(new_idx) = renamed.get(&path_idx) {
                         *new_idx
                     } else {
-                        let file_path = info.path_ref().clone();
+                        let file_path = *info.path_ref();
 
                         let new_idx = info.archive_mut().insert_file_path(FilePath::from_parts(
                             file_path.path().const_with(".reshared"),
@@ -1028,9 +1029,9 @@ fn initial_loading(_ctx: &InlineCtx) {
 
                     if let Some(reshare_info) = reverse_unshare_cache.remove(&info_mut.index()) {
                         assert_eq!(info_mut.index(), info_mut.entity_ref().info().index());
-                        let mut info = info_mut.clone();
-                        let mut desc = info_mut.desc_ref().clone();
-                        let data = info_mut.desc_ref().data().clone();
+                        let mut info = *info_mut;
+                        let mut desc = *info_mut.desc_ref();
+                        let data = *info_mut.desc_ref().data();
                         let entity_index = info_mut.entity_ref().index();
                         let group_idx = info_mut.entity_ref().package_or_group();
                         let archive = info_mut.archive_mut();
@@ -1186,7 +1187,7 @@ fn initial_loading(_ctx: &InlineCtx) {
                             if parent_hash != Hash40::const_new("") {
                                 parent_hash = parent_hash.const_with("/");
                             }
-                            parent_hash = parent_hash.const_with(*component);
+                            parent_hash = parent_hash.const_with(component);
                         }
                         println!(
                             "Adding new package {}, child of {}",
@@ -1202,7 +1203,7 @@ fn initial_loading(_ctx: &InlineCtx) {
                     }
                 }
 
-                new_files_by_package.entry(package).or_default().push(&file);
+                new_files_by_package.entry(package).or_default().push(file);
             }
         }
 
@@ -1223,10 +1224,7 @@ fn initial_loading(_ctx: &InlineCtx) {
                 + (package_names.len() as u32);
 
             for child_package_idx in child_package_range {
-                let child_package = archive
-                    .get_file_package_child(child_package_idx)
-                    .unwrap()
-                    .clone();
+                let child_package = *archive.get_file_package_child(child_package_idx).unwrap();
                 archive.push_file_package_child(child_package);
             }
 
@@ -1278,7 +1276,7 @@ fn initial_loading(_ctx: &InlineCtx) {
             let new_range_start = archive.num_file_info() as u32;
             let new_range_len = (file_info_range.end - file_info_range.start) + files.len() as u32;
             for file_info_idx in file_info_range {
-                let info = archive.get_file_info_mut(file_info_idx).unwrap().clone();
+                let info = *archive.get_file_info_mut(file_info_idx).unwrap();
                 let new_idx = archive.push_file_info(info);
                 let mut info = archive.get_file_info_mut(new_idx).unwrap();
                 if info.path_ref().entity().info().index() == file_info_idx {

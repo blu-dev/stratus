@@ -1,7 +1,4 @@
-use std::{
-    alloc::Layout,
-    io::{Read, Seek, SeekFrom},
-};
+use std::alloc::Layout;
 
 use bytemuck::{Pod, Zeroable};
 use camino::Utf8Path;
@@ -13,51 +10,7 @@ use crate::{
         FilePath, IntoHash, SearchFolder, SearchPath, SearchPathLink, StreamData, StreamEntity,
         StreamFolder, StreamPath,
     },
-    HashDisplay,
 };
-
-fn read_pod<R: Read, T: Pod>(reader: &mut R) -> T {
-    let mut uninit = T::zeroed();
-    assert_eq!(
-        reader
-            .read(bytemuck::cast_slice_mut(std::slice::from_mut(&mut uninit)))
-            .unwrap(),
-        std::mem::size_of::<T>()
-    );
-
-    uninit
-}
-
-fn ru32<R: Read>(reader: &mut R) -> u32 {
-    let mut bytes = [0; std::mem::size_of::<u32>()];
-    assert_eq!(reader.read(&mut bytes).unwrap(), std::mem::size_of::<u32>());
-
-    u32::from_le_bytes(bytes)
-}
-
-unsafe fn alloc_uninit(size: usize) -> Box<[u8]> {
-    Box::from_raw(std::slice::from_raw_parts_mut(
-        std::alloc::alloc(Layout::from_size_align(size, 0x10).unwrap()),
-        size,
-    ))
-}
-
-#[track_caller]
-fn read_exact_size<R: Read>(reader: &mut R, size: usize) -> Box<[u8]> {
-    // SAFETY: We initialize it here
-    let mut uninit = unsafe { alloc_uninit(size) };
-
-    let count = reader
-        .read(&mut uninit)
-        .expect("Failed to read from reader");
-
-    // We don't need to worry about the panic unwindining dropping the uninit data since it's just u8 anyways
-    if count < uninit.len() {
-        panic!("Failed to fill whole buffer");
-    }
-
-    uninit
-}
 
 #[repr(C)]
 #[derive(Debug)]
@@ -69,15 +22,6 @@ pub struct ZstdBuffer {
 
 #[skyline::from_offset(0x39a2fc0)]
 pub fn decompress_stream(unk: *mut u64, output: &mut ZstdBuffer, input: &mut ZstdBuffer) -> usize;
-
-#[repr(C)]
-struct ZstdDecompressor([u64; 2]);
-
-#[skyline::from_offset(0x35410b0)]
-fn initialize_decompressor(ptr: *mut ZstdDecompressor) -> u64;
-
-#[skyline::from_offset(0x3541030)]
-fn finalize_decompressor(ptr: *mut ZstdDecompressor);
 
 #[repr(align(8), C)]
 struct FileNX([u8; 0x228]);
@@ -93,84 +37,6 @@ fn read_compressed_at_offset(file_nx: &mut *mut FileNX, offset: usize) -> *mut u
 
 #[skyline::from_offset(0x37c58c0)]
 fn read_into_ptr(file_nx: *mut FileNX, buffer: *mut u8, size: usize) -> usize;
-
-pub fn read_compressed_section<R: Read + Seek>(reader: &mut R) -> Box<[u8]> {
-    const REQUIRED_TABLE_SIZE: u32 = 0x10;
-
-    let start = reader.stream_position().unwrap();
-    assert_eq!(ru32(reader), REQUIRED_TABLE_SIZE);
-
-    let decompressed_size = ru32(reader);
-    let compressed_size = ru32(reader);
-    let offset_to_next = ru32(reader);
-
-    let mut file_ptr: *mut FileNX = std::ptr::null_mut();
-
-    // unsafe {
-    //     init_file(&mut file_ptr, c"rom:/data.arc".as_ptr());
-    // }
-
-    // let mut compressed = read_exact_size(reader, compressed_size as usize);
-    // println!("Read {:#x} bytes", compressed.len());
-
-    // // SAFETY: Reference call at 0x3540bb4 - instructions initialize 0x10 bytes worth of space and pass it to
-    // // what we've labeled `initialize_decompressor`, it is the constructor for this type. It only uses
-    // // the decompression codepath if the return value of the constructor is 0
-    // let mut decompressor = ZstdDecompressor([0u64; 2]);
-    // unsafe {
-    //     assert_eq!(initialize_decompressor(&mut decompressor), 0);
-    //     // println!("{:#x?}", decompressor);
-    // }
-
-    // // SAFETY: We initialize below, and we also assert that the count of bytes is the same
-    // //  as the decompressed size
-    // let mut decompressed = unsafe { alloc_uninit(decompressed_size as usize) };
-
-    // let mut input_buffer = ZstdBuffer {
-    //     ptr: compressed.as_mut_ptr(),
-    //     size: compressed.len(),
-    //     pos: 0,
-    // };
-
-    // let mut output_buffer = ZstdBuffer {
-    //     ptr: decompressed.as_mut_ptr(),
-    //     size: decompressed.len(),
-    //     pos: 0,
-    // };
-
-    // // SAFETY: Reference call at 0x3540ca4 - Passes the second u64 from the initialize_decompressor call as well as two
-    // // pointer buffers that match the structure as they are defined in this file: output first then input
-    // let result = unsafe {
-    //     decompress_stream(
-    //         decompressor.0[1] as *mut u64,
-    //         &mut output_buffer,
-    //         &mut input_buffer,
-    //     )
-    // };
-
-    // // NOTE: Call the destructor first since if we panic it will not exit with RAII (too lazy to write a struct for this)
-    // // SAFETY: Destructor for the decompressor. Disassembly does not help ensure that this is the deconstructor,
-    // // but in practice it seems to be fine and the function frees/releases data
-    // unsafe {
-    //     // println!("{:#x?}", decompressor);
-    //     finalize_decompressor(&raw mut decompressor);
-    // }
-
-    // // Negative value for result is error code
-    // assert_eq!(result, 0x0, "{result}");
-    // assert_eq!(output_buffer.pos, decompressed_size as usize);
-
-    // println!("Read {} decompressed bytes", decompressed.len());
-
-    // This should seek past the compressed section and go to the start of the next valid data
-    // This might skip past more bytes than are in the compressed section, but that's how the file format
-    // was designed
-    reader
-        .seek(std::io::SeekFrom::Start(start + offset_to_next as u64))
-        .unwrap();
-
-    todo!()
-}
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
@@ -188,16 +54,6 @@ impl ArchiveMetadata {
     const MAGIC: u64 = 0xABCDEF9876543210;
 }
 
-impl ArchiveMetadata {
-    pub fn read<R: Read>(reader: &mut R) -> Self {
-        let bytes = read_exact_size(reader, std::mem::size_of::<Self>());
-
-        let this: &Self = bytemuck::from_bytes(&bytes);
-        assert_eq!(this.magic, Self::MAGIC, "{:#x}", this.magic);
-        *this
-    }
-}
-
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable, PartialEq, Eq)]
 pub struct SearchTableHeader {
@@ -208,6 +64,7 @@ pub struct SearchTableHeader {
     path_count: u32,
 }
 
+#[allow(unused)]
 const REGION_COUNT: usize = 5;
 const LOCALE_COUNT: usize = 14;
 
@@ -517,7 +374,7 @@ impl ResourceTables {
 }
 
 pub struct Archive {
-    metadata: ArchiveMetadata,
+    _metadata: ArchiveMetadata,
     resource: ResourceTables,
     search: SearchTables,
 }
@@ -596,6 +453,7 @@ macro_rules! decl_access {
     }
 }
 
+#[allow(dead_code)]
 impl Archive {
     decl_lookup! {
         file_path => FilePath,
@@ -663,21 +521,11 @@ impl Archive {
     }
 
     pub fn insert_search_path(&mut self, path: SearchPath) -> u32 {
-        let link_index = if self.search.path_link_real_count as usize
-            >= self.search.search_path_link.len()
-            || true
-        {
-            let index = self.search.search_path.push(path);
-            self.search
-                .search_path_link
-                .push(SearchPathLink::new(index))
-        } else {
-            let index = self.search.path_link_real_count;
-            self.search.path_link_real_count += 1;
-            *self.search.search_path_link.get_mut(index).unwrap() = SearchPathLink::new(index);
-            *self.search.search_path.get_mut(index).unwrap() = path;
-            index
-        };
+        let link_index = self.search.path_link_real_count;
+        self.search.path_link_real_count += 1;
+        *self.search.search_path_link.get_mut(link_index).unwrap() =
+            SearchPathLink::new(link_index);
+        *self.search.search_path.get_mut(link_index).unwrap() = path;
 
         self.search
             .search_path_lookup
@@ -752,7 +600,7 @@ impl Archive {
         let search = SearchTables::from_bytes(search_slice);
 
         Self {
-            metadata,
+            _metadata: metadata,
             resource,
             search,
         }

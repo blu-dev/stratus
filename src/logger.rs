@@ -31,6 +31,7 @@ impl NxKernelLogger {
         }
     }
 
+    #[allow(dead_code)]
     pub fn module(mut self, module: &'static str, level: Level) -> Self {
         self.by_module.insert(module, level);
         self
@@ -43,8 +44,8 @@ impl log::Log for NxKernelLogger {
     }
 
     fn log(&self, record: &log::Record) {
-        if self.enabled(record.metadata()) {
-            if record
+        if self.enabled(record.metadata())
+            && record
                 .module_path_static()
                 .and_then(|module| {
                     self.by_module
@@ -52,11 +53,9 @@ impl log::Log for NxKernelLogger {
                 })
                 .map(|filter| record.level() <= *filter)
                 .unwrap_or_else(|| record.level() <= Level::Info)
-            {
-                let message = format!("[{: <5}]  {}", record.level(), record.args());
-                // println!("{message}");
-                unsafe { print_debug_string(message.as_ptr().cast(), message.len()) };
-            }
+        {
+            let message = format!("[{: <5}]  {}", record.level(), record.args());
+            unsafe { print_debug_string(message.as_ptr().cast(), message.len()) };
         }
     }
 

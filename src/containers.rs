@@ -22,12 +22,12 @@ pub(crate) struct Table<T> {
 impl<T: Pod> Table<T> {
     /// SAFETY:
     /// - Caller must ensure that the data contained within the first
-    ///     `count * std::mem::size_of::<T>()` bytes of `slice` are valid
-    ///     values for `T`
+    ///   `count * std::mem::size_of::<T>()` bytes of `slice` are valid
+    ///   values for `T`
     /// - Caller must ensure that the returned table does not outlive `slice`
     /// - Caller must ensure that the range of data pointed to in the first
-    ///     `count * std::mem::size_of::<T>()` has no other exclusive references
-    ///     before or after creation of this table
+    ///   `count * std::mem::size_of::<T>()` has no other exclusive references
+    ///   before or after creation of this table
     pub unsafe fn new(slice: &mut [u8], count: usize) -> Self {
         let slice = &mut slice[..count * std::mem::size_of::<T>()];
         let slice = bytemuck::cast_slice_mut(slice);
@@ -61,7 +61,7 @@ impl<T: Pod> Table<T> {
     pub fn fixed_byte_len(&self) -> usize {
         // SAFETY: Caller guarantees in constructor that there are no other mutable references
         //      to this data
-        unsafe { (&(*self.fixed)).len() * std::mem::size_of::<T>() }
+        unsafe { std::mem::size_of_val(&(*self.fixed)) }
     }
 }
 
@@ -291,7 +291,7 @@ impl<'a, T> TableMut<'a, T> {
     ) -> Option<Self> {
         let archive: *mut Archive = archive;
         let table = get_table(unsafe { &mut *archive });
-        table.contains(index).then(|| Self {
+        table.contains(index).then_some(Self {
             archive,
             table,
             index,
@@ -473,12 +473,12 @@ pub struct IndexLookup {
 impl IndexLookup {
     /// SAFETY:
     /// - Caller must ensure that the data contained within the first
-    ///     `count * std::mem::size_of::<HashWithData>()` bytes of `slice` are valid
-    ///     values for `T`
+    ///   `count * std::mem::size_of::<HashWithData>()` bytes of `slice` are valid
+    ///   values for `T`
     /// - Caller must ensure that the returned table does not outlive `slice`
     /// - Caller must ensure that the range of data pointed to in the first
-    ///     `count * std::mem::size_of::<HashWithData>()` has no other exclusive references
-    ///     before or after creation of this table
+    ///   `count * std::mem::size_of::<HashWithData>()` has no other exclusive references
+    ///   before or after creation of this table
     pub unsafe fn new(slice: &mut [u8], count: usize) -> Self {
         let slice = &mut slice[..count * std::mem::size_of::<HashWithData>()];
         let slice = bytemuck::cast_slice_mut(slice);
@@ -522,7 +522,7 @@ impl IndexLookup {
     pub fn fixed_byte_len(&self) -> usize {
         // SAFETY: Caller guarantees in constructor that there are no other mutable references
         //      to this data. They also provide a reference so the pointer is aligned and non-null
-        unsafe { (&*self.fixed).len() * std::mem::size_of::<HashWithData>() }
+        unsafe { std::mem::size_of_val(&*self.fixed) }
     }
 
     /// Checks if the provided hash is contained within this lookup
@@ -661,11 +661,11 @@ pub struct BucketLookup {
 impl BucketLookup {
     /// SAFETY:
     /// - Caller must ensure that the data contained within the first [`Self::fixed_byte_len`]
-    ///     bytes of `slice` are valid values for `T`
+    ///   bytes of `slice` are valid values for `T`
     /// - Caller must ensure that the returned table does not outlive `slice`
     /// - Caller must ensure that the range of data pointed to in the first
-    ///     `count * std::mem::size_of::<HashWithData>()` has no other exclusive references
-    ///     before or after creation of this table
+    ///   `count * std::mem::size_of::<HashWithData>()` has no other exclusive references
+    ///   before or after creation of this table
     pub unsafe fn new(slice: &mut [u8], hash_count: usize, bucket_count: usize) -> Self {
         let bucket_len = bucket_count * std::mem::size_of::<Bucket>();
         let bucket_slice = &mut slice[..bucket_len];
@@ -692,7 +692,7 @@ impl BucketLookup {
     pub unsafe fn write_and_update(&mut self, buffer: &mut [u8], offset: usize) {
         let full_count = (*self.fixed_buckets)
             .iter()
-            .map(|bucket| bucket.count as u32)
+            .map(|bucket| bucket.count)
             .sum::<u32>()
             + self
                 .dynamic
@@ -767,8 +767,7 @@ impl BucketLookup {
         // SAFETY: Caller guarantees in constructor that there are no other mutable references
         //      to this data
         unsafe {
-            (&*self.fixed_hashes).len() * std::mem::size_of::<HashWithData>()
-                + (&*self.fixed_buckets).len() * std::mem::size_of::<Bucket>()
+            std::mem::size_of_val(&*self.fixed_hashes) + std::mem::size_of_val(&*self.fixed_buckets)
         }
     }
 
@@ -856,7 +855,7 @@ impl BucketLookup {
         hashes
             .binary_search_by_key(&hash, |key| key.hash40())
             .ok()
-            .map(|index| u32::from(hashes[index].data()))
+            .map(|index| hashes[index].data())
             .or_else(|| self.dynamic[bucket_index].get(&hash).copied())
     }
 
@@ -952,7 +951,7 @@ impl<'a> Iterator for BucketLookupIter<'a> {
         }
 
         match (self.current_fixed, self.current_dynamic) {
-            (None, None) => return None,
+            (None, None) => None,
             (Some((hash, index)), None) => {
                 self.current_fixed = self.fixed_bucket.next().map(|h| (h.hash40(), h.data()));
                 Some((hash, index))

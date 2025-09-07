@@ -1,10 +1,6 @@
-use std::{
-    cell::UnsafeCell,
-    io::{BufReader, Read},
-};
+use std::{cell::UnsafeCell, io::Read};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use skyline::nn::fs::FileHandle;
 use smash_hash::{Hash40, Hash40Map};
 
 use crate::{
@@ -13,7 +9,7 @@ use crate::{
     HashDisplay,
 };
 
-const MODS_ROOT: &'static str = "sd:/ultimate/mods/";
+const MODS_ROOT: &str = "sd:/ultimate/mods/";
 
 fn discover_and_update_recursive(
     root: &Utf8Path,
@@ -38,85 +34,6 @@ fn discover_and_update_recursive(
         } else {
             discover_and_update_recursive(root, entry.path(), add_path);
         }
-    }
-}
-
-pub struct NnsdkFile {
-    handle: skyline::nn::fs::FileHandle,
-    offset: usize,
-    len: usize,
-}
-
-impl NnsdkFile {
-    pub fn open(path: &Utf8Path) -> Self {
-        let mut handle = skyline::nn::fs::FileHandle { handle: 0 };
-        let mut file_size = 0i64;
-        let path = format!("{path}\0");
-        unsafe {
-            assert!(
-                skyline::nn::fs::OpenFile(
-                    &mut handle,
-                    path.as_ptr(),
-                    skyline::nn::fs::OpenMode_OpenMode_Read as i32
-                ) == 0x0
-            );
-            assert!(skyline::nn::fs::GetFileSize(&mut file_size, handle) == 0x0);
-        }
-        Self {
-            handle,
-            offset: 0,
-            len: file_size as usize,
-        }
-    }
-}
-
-impl std::io::Seek for NnsdkFile {
-    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        match pos {
-            std::io::SeekFrom::Start(offset) => {
-                self.offset = offset as usize;
-            }
-            std::io::SeekFrom::Current(offset) => {
-                self.offset = self.offset.wrapping_add_signed(offset as isize);
-            }
-            std::io::SeekFrom::End(offset) => {
-                self.offset = self.len.wrapping_add_signed(offset as isize);
-            }
-        }
-
-        Ok(self.offset as u64)
-    }
-}
-
-unsafe extern "C" {
-    #[link_name = "_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvmRKNS0_10ReadOptionE"]
-    unsafe fn read_file(
-        out: &mut u64,
-        handle: FileHandle,
-        offset: i64,
-        buf: *mut u8,
-        buf_len: u64,
-        read_option: &i32,
-    ) -> u32;
-}
-
-impl std::io::Read for NnsdkFile {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let mut out_size = 0u64;
-        unsafe {
-            assert!(
-                read_file(
-                    &mut out_size,
-                    self.handle,
-                    self.offset as _,
-                    buf.as_mut_ptr(),
-                    buf.len() as _,
-                    &0,
-                ) == 0x0
-            );
-        }
-        self.offset += out_size as usize;
-        Ok(out_size as usize)
     }
 }
 
@@ -156,9 +73,7 @@ impl FileSystem {
         use std::fmt::Write;
         buffer.clear();
 
-        let Some(file) = self.files.get(&hash) else {
-            return None;
-        };
+        let file = self.files.get(&hash)?;
 
         let name = match &self.roots[file.root_idx as usize] {
             ModRoot::Folder(folder) => folder.as_str(),
@@ -303,7 +218,7 @@ pub fn discover_and_update_hashes(
                 if hash.intern_path(cache, path).is_new {
                     file_system.new_files.push(NewFile {
                         filepath: FilePath::from_utf8_path(path),
-                        size: size as u32,
+                        size,
                     });
                 }
                 // intern_elapsed += now.elapsed();
@@ -312,7 +227,7 @@ pub fn discover_and_update_hashes(
                     path.into_hash(),
                     DiscoveredFile {
                         root_idx,
-                        size: size as u32,
+                        size,
                         wayfinder: Some(entry.wayfinder()),
                     },
                 );
