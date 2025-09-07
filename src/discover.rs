@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::{alloc::Layout, io::Read, ptr::NonNull};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use smash_hash::{Hash40, Hash40Map};
@@ -40,10 +40,17 @@ fn discover_and_update_recursive(
 pub struct DiscoveredFile {
     root_idx: u32,
     size: u32,
-    wayfinder: Option<rawzip::ZipArchiveEntryWayfinder>,
+    file: LoadableFile,
 }
 
 impl DiscoveredFile {
+    pub fn compressed_size(&self) -> Option<u32> {
+        match &self.file {
+            LoadableFile::ZipFile { wayfinder, .. } => Some(wayfinder.compressed_size_hint() as u32),
+            _ => None
+        }
+    }
+
     pub fn size(&self) -> u32 {
         self.size
     }
@@ -54,73 +61,143 @@ pub struct NewFile {
     pub size: u32,
 }
 
-pub enum ModRoot {
-    Folder(Utf8PathBuf),
-    Zip {
-        path: Utf8PathBuf,
-        archive: rawzip::ZipArchive<rawzip::FileReader>,
-    },
-}
-
 pub struct FileSystem {
-    roots: Vec<ModRoot>,
+    roots: Vec<Utf8PathBuf>,
     files: Hash40Map<DiscoveredFile>,
     pub new_files: Vec<NewFile>,
 }
 
 impl FileSystem {
-    pub fn get_full_file_path(&self, hash: Hash40, buffer: &mut String) -> Option<u32> {
+    const COMPRESSED_PTR_BIT: u64 = 1u64 << 63;
+
+    fn into_compressed_ptr(real_ptr: *mut u8) -> Option<*mut u8> {
+        if (real_ptr as u64) & Self::COMPRESSED_PTR_BIT != 0 {
+            // Maybe panic here instead
+            None
+        } else {
+            Some(((real_ptr as u64) | Self::COMPRESSED_PTR_BIT) as *mut u8)
+        }
+    }
+
+    fn into_real_ptr(compressed_ptr: *mut u8) -> Option<*mut u8> {
+        if (compressed_ptr as u64) & Self::COMPRESSED_PTR_BIT != 0 {
+            Some(((compressed_ptr as u64) & !Self::COMPRESSED_PTR_BIT) as *mut u8)
+        } else {
+            None
+        }
+    }
+
+    pub fn get_file(&self, hash: Hash40) -> Option<&DiscoveredFile> {
+        self.files.get(&hash)
+    }
+
+    #[must_use = "This method can fail if the hash was not found"]
+    pub fn get_full_file_path(&self, hash: Hash40, buffer: &mut String) -> bool {
         use std::fmt::Write;
         buffer.clear();
 
-        let file = self.files.get(&hash)?;
-
-        let name = match &self.roots[file.root_idx as usize] {
-            ModRoot::Folder(folder) => folder.as_str(),
-            ModRoot::Zip { path, .. } => path.as_str(),
+        let Some(file) = self.files.get(&hash) else {
+            return false;
         };
+        let _ = write!(buffer, "{}/{}", self.roots[file.root_idx as usize], hash.display());
 
-        let _ = write!(buffer, "{}/{}", name, hash.display());
-        Some(file.size())
+        true
     }
 
-    pub fn load_into_buffer(&self, hash: Hash40, filepath: &String, buffer: &mut [u8]) {
-        let file = self.files.get(&hash).unwrap();
+    pub fn decompress_loaded_file(file: &DiscoveredFile, pointer: NonNull<u8>) -> NonNull<u8> {
+        // Check if the uppermost bit is set in the pointer, if it is then we it's compressed and
+        // we need to decompress it. This should also cause a memory access violation and crash if
+        // we fail to decompress it before providing it to the game.
+        if let Some(real_ptr) = Self::into_real_ptr(pointer.as_ptr()) {
+            // TODO: Move this out of unwrap
+            let compressed_size = file.compressed_size().unwrap();
 
-        match &self.roots[file.root_idx as usize] {
-            ModRoot::Folder(_) => {
-                let mut file = std::fs::File::open(filepath).unwrap();
-                let count = file.read(buffer).unwrap();
-                assert!(count == buffer.len());
+            let compressed_buffer = unsafe {
+                std::slice::from_raw_parts(real_ptr, compressed_size as usize)
+            };
+
+            let decompressed_buffer_layout = unsafe {
+                // TODO: We default to page alignment here but we could probably be more optimal
+                std::alloc::Layout::from_size_align_unchecked(file.size as usize, 0x1000)
+            };
+
+            let decompressed_ptr = unsafe {
+                std::alloc::alloc(decompressed_buffer_layout)
+            };
+
+            let decompressed_buffer = unsafe {
+                std::slice::from_raw_parts_mut(decompressed_ptr, decompressed_buffer_layout.size())
+            };
+
+            // TODO: figure out removing unwrap, or don't this is technically user data
+            flate2::bufread::DeflateDecoder::new(std::io::Cursor::new(compressed_buffer)).read_exact(decompressed_buffer).unwrap();
+
+            unsafe {
+                std::alloc::dealloc(real_ptr, std::alloc::Layout::from_size_align_unchecked(compressed_size as usize, 0x1));
             }
-            ModRoot::Zip { archive, .. } => {
-                let wayfinder = self.files.get(&hash).unwrap().wayfinder.unwrap();
-                let file = archive.get_entry(wayfinder).unwrap();
 
-                let layout = std::alloc::Layout::from_size_align(
-                    wayfinder.compressed_size_hint() as usize,
-                    0x1,
-                )
-                .unwrap();
-                let compressed_buffer = unsafe { std::alloc::alloc(layout) };
+            unsafe {
+                NonNull::new_unchecked(decompressed_ptr)
+            }
+        } else {
+            pointer
+        }
+    }
 
-                assert!(!compressed_buffer.is_null());
+    fn load_zip_file(zip: &rawzip::ZipArchive<rawzip::FileReader>, wayfinder: rawzip::ZipArchiveEntryWayfinder) -> NonNull<u8> {
+        // SAFETY: Compressed size must be <= u32::MAX, and if it's not then we are going
+        // to OOM anyways. Realistically I don't think a user is going to do that so I
+        // won't bother doing the unwrap panic check here (and if they do the worst that
+        // happens is that their game crashes)
+        let buffer_layout = unsafe { std::alloc::Layout::from_size_align(wayfinder.compressed_size_hint() as usize, 0x1).unwrap_unchecked() };
+        let compressed_buffer = unsafe { std::alloc::alloc(buffer_layout) };
+        assert!(!compressed_buffer.is_null());
 
-                let slice = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        compressed_buffer,
-                        wayfinder.compressed_size_hint() as usize,
-                    )
+        let slice = unsafe {
+            std::slice::from_raw_parts_mut(compressed_buffer, buffer_layout.size())
+        };
+
+        // TODO: Check if this can be unwrap_unchecked?
+        let file = zip.get_entry(wayfinder).unwrap();
+
+        file.reader().read_exact(slice).unwrap();
+
+        unsafe { NonNull::new_unchecked(Self::into_compressed_ptr(compressed_buffer).unwrap()) }
+    }
+
+    /// Loads the file, optionally leaving it compressed.
+    ///
+    /// Leaving it compressed is only going to perform performance if the loading thread is not the
+    /// one that needs to do the decompression. In practice, this means that `ResLoadingThread`
+    /// will leave the file compressed while `ResInflateThread` will either do the decompression
+    /// after receiving the pointer, or it will decompress it while loading
+    pub fn load_file(&self, hash: Hash40, file: &DiscoveredFile, filepath_buffer: &mut String, leave_compressed: bool) -> NonNull<u8> {
+        match &file.file {
+            LoadableFile::UncompressedOnDisk => {
+                // TODO: Assert?
+                assert!(self.get_full_file_path(hash, filepath_buffer));
+
+                let size = file.size();
+                let buffer_ptr = unsafe {
+                    std::alloc::alloc(Layout::from_size_align_unchecked(size as usize, 0x1000))
+                };
+                assert!(!buffer_ptr.is_null());
+
+                let buffer = unsafe {
+                    std::slice::from_raw_parts_mut(buffer_ptr, size as usize)
                 };
 
-                file.reader().read_exact(slice).unwrap();
+                let mut file = std::fs::File::open(filepath_buffer).unwrap();
+                file.read_exact(buffer).unwrap();
 
-                flate2::bufread::DeflateDecoder::new(std::io::Cursor::new(slice))
-                    .read_exact(buffer)
-                    .unwrap();
-
-                unsafe {
-                    std::alloc::dealloc(compressed_buffer, layout);
+                unsafe { NonNull::new_unchecked(buffer_ptr) }
+            },
+            LoadableFile::ZipFile { zip, wayfinder } => {
+                let ptr = Self::load_zip_file(zip, *wayfinder);
+                if leave_compressed {
+                    ptr
+                } else {
+                    Self::decompress_loaded_file(file, ptr)
                 }
             }
         }
@@ -129,6 +206,14 @@ impl FileSystem {
     pub fn files(&self) -> impl IntoIterator<Item = (&Hash40, &DiscoveredFile)> {
         self.files.iter()
     }
+}
+
+pub enum LoadableFile {
+    UncompressedOnDisk,
+    ZipFile {
+        zip: &'static rawzip::ZipArchive<rawzip::FileReader>,
+        wayfinder: rawzip::ZipArchiveEntryWayfinder
+    },
 }
 
 pub fn discover_and_update_hashes(
@@ -154,14 +239,11 @@ pub fn discover_and_update_hashes(
             let root_idx: u32 = file_system.roots.len().try_into().unwrap();
             file_system
                 .roots
-                .push(ModRoot::Folder(root.path().to_path_buf()));
+                .push(root.path().to_path_buf());
             discover_and_update_recursive(
                 root.path(),
                 root.path(),
                 &mut |file_path: &Utf8Path, len: u32| {
-                    if len == 0 {
-                        println!("{file_path} has a len of 0");
-                    }
                     if let Some(file_name) = file_path.file_name() {
                         hash.intern_path(cache, Utf8Path::new(file_name));
                     }
@@ -174,12 +256,13 @@ pub fn discover_and_update_hashes(
                             size: len,
                         });
                     }
+
                     file_system.files.insert(
                         file_path.into_hash(),
                         DiscoveredFile {
                             root_idx,
                             size: len,
-                            wayfinder: None,
+                            file: LoadableFile::UncompressedOnDisk,
                         },
                     );
                 },
@@ -193,6 +276,8 @@ pub fn discover_and_update_hashes(
                 &mut buffer,
             )
             .unwrap();
+
+            let archive: &'static rawzip::ZipArchive<rawzip::FileReader> = Box::leak(Box::new(archive));
 
             file_system.files.reserve(archive.entries_hint() as usize);
 
@@ -219,14 +304,16 @@ pub fn discover_and_update_hashes(
                         size,
                     });
                 }
-                // intern_elapsed += now.elapsed();
 
                 file_system.files.insert(
                     path.into_hash(),
                     DiscoveredFile {
                         root_idx,
                         size,
-                        wayfinder: Some(entry.wayfinder()),
+                        file: LoadableFile::ZipFile {
+                            zip: archive,
+                            wayfinder: entry.wayfinder(),
+                        }
                     },
                 );
             }
@@ -235,92 +322,7 @@ pub fn discover_and_update_hashes(
                 now.elapsed().as_micros() as f32 / 1000.0
             );
 
-            file_system.roots.push(ModRoot::Zip {
-                path: root.path().to_path_buf(),
-                archive,
-            });
-
-            // let archive = rawzip::ZipArchive::from_file(
-            //     std::fs::File::open(root.path()).unwrap(),
-            //     &mut buffer,
-            // )
-            // .unwrap();
-
-            // let now = std::time::Instant::now();
-            // let mut zip_archive =
-            //     zip::ZipArchive::new(BufReader::new(std::fs::File::open(root.path()).unwrap()))
-            //         .unwrap();
-            // println!(
-            //     "[stratus::discovery] Read zip file in {:.3}s",
-            //     now.elapsed().as_secs_f32()
-            // );
-
-            // let mut indices = vec![];
-            // let now = std::time::Instant::now();
-            // for path in zip_archive.file_names() {
-            //     indices.push(zip_archive.index_for_name(path).unwrap());
-            // }
-            // println!(
-            //     "[stratus::discovery] Iterating file names {:.3}ms",
-            //     now.elapsed().as_micros() as f32 / 1000.0
-            // );
-
-            // let now = std::time::Instant::now();
-            // let mut obtain_elapsed = std::time::Duration::from_millis(0);
-            // let mut is_dir_elapsed = std::time::Duration::from_millis(0);
-            // let mut is_dir_count = 0;
-            // let mut intern_elapsed = std::time::Duration::from_millis(0);
-            // let mut total = 0usize;
-            // for index in indices {
-            //     is_dir_count += 1;
-            //     let now = std::time::Instant::now();
-            //     let file = zip_archive.by_index(index).unwrap();
-            //     obtain_elapsed += now.elapsed();
-
-            //     let now = std::time::Instant::now();
-            //     if file.is_dir() {
-            //         is_dir_elapsed += now.elapsed();
-            //         continue;
-            //     }
-
-            //     total += 1;
-
-            //     let now = std::time::Instant::now();
-            //     let path = file.name();
-            //     let path = Utf8Path::new(path);
-            //     if let Some(file_name) = path.file_name() {
-            //         hash.intern_path(cache, Utf8Path::new(file_name));
-            //     }
-            //     if let Some(ext) = path.extension() {
-            //         hash.intern_path(cache, Utf8Path::new(ext));
-            //     }
-
-            //     let size = file.size();
-
-            //     if hash.intern_path(cache, path).is_new {
-            //         file_system.new_files.push(NewFile {
-            //             filepath: FilePath::from_utf8_path(path),
-            //             size: size as u32,
-            //         });
-            //     }
-            //     intern_elapsed += now.elapsed();
-
-            //     file_system.files.insert(
-            //         path.into_hash(),
-            //         DiscoveredFile {
-            //             root_idx,
-            //             size: size as u32,
-            //         },
-            //     );
-            // }
-
-            // println!(
-            //     "[stratus::discovery] Avg time per file: Obtain={:.3}ms, IsDir={:.3}ms, Intern={:.3}ms, Total={:.3}ms",
-            //     obtain_elapsed.as_millis() as f32 / is_dir_count as f32,
-            //     is_dir_elapsed.as_millis() as f32 / is_dir_count as f32,
-            //     intern_elapsed.as_millis() as f32 / total as f32,
-            //     now.elapsed().as_millis() as f32 / total as f32,
-            // );
+            file_system.roots.push(root.path().to_path_buf());
         }
 
         println!(

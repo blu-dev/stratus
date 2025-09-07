@@ -521,11 +521,8 @@ impl Archive {
     }
 
     pub fn insert_search_path(&mut self, path: SearchPath) -> u32 {
-        let link_index = self.search.path_link_real_count;
-        self.search.path_link_real_count += 1;
-        *self.search.search_path_link.get_mut(link_index).unwrap() =
-            SearchPathLink::new(link_index);
-        *self.search.search_path.get_mut(link_index).unwrap() = path;
+        let index = self.search.search_path.push(path);
+        let link_index = self.search.search_path_link.push(SearchPathLink::new(index));
 
         self.search
             .search_path_lookup
