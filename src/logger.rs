@@ -13,7 +13,9 @@ extern "C" {
 
 #[skyline::hook(replace = skyline_tcp_send_raw)]
 unsafe fn send_raw_hook(bytes: *const u8, size: usize) {
-    print_debug_string(bytes.cast(), size);
+    let string = std::str::from_utf8_unchecked(std::slice::from_raw_parts(bytes, size));
+    let string = string.trim_end();
+    print_debug_string(string.as_ptr().cast(), string.len());
 }
 
 pub fn install_hooks() {

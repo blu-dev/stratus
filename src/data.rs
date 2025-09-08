@@ -783,9 +783,39 @@ impl FilePackage {
         self.path_and_group.hash40()
     }
 
+    pub fn name(&self) -> Hash40 {
+        self.name.hash40()
+    }
+
+    pub fn parent(&self) -> Hash40 {
+        self.parent.hash40()
+    }
+
     pub fn set_child_package_range(&mut self, start: u32, count: u32) {
         self.child_start = start;
         self.child_count = count;
+    }
+
+    pub fn has_file_group(&self) -> bool {
+        (self.flags & (FilePackageFlags::HAS_SUB_PACKAGE | FilePackageFlags::IS_SYM_LINK)) == FilePackageFlags::HAS_SUB_PACKAGE
+    }
+
+    pub fn has_sym_link(&self) -> bool {
+        let flags = FilePackageFlags::HAS_SUB_PACKAGE | FilePackageFlags::IS_SYM_LINK;
+        (self.flags & flags) == flags
+    }
+
+    pub fn set_info_range(&mut self, start: u32, count: u32) {
+        self.info_start = start;
+        self.info_count = count;
+    }
+
+    pub fn flags(&self) -> FilePackageFlags {
+        self.flags
+    }
+
+    pub fn set_flags(&mut self, flags: FilePackageFlags) {
+        self.flags = flags;
     }
 }
 
@@ -796,17 +826,23 @@ impl<'a> TableRef<'a, FilePackage> {
             .unwrap()
     }
 
+    pub fn sym_link(&self) -> TableRef<'a, FilePackage> {
+        assert!(self.has_sym_link());
+
+        let dg = self.archive().get_file_group(self.path_and_group.data()).unwrap();
+
+        self.archive().get_file_package(dg.redirection).unwrap()
+    }
+
     pub fn file_group(&self) -> Option<TableRef<'a, FileGroup>> {
+        assert!(self.has_file_group());
+
         let dg = self
             .archive()
             .get_file_group(self.path_and_group.data())
             .unwrap();
 
-        if dg.redirection > self.archive().num_file_package() as u32 && dg.redirection != 0xFFFFFF {
-            Some(self.archive().get_file_group(dg.redirection).unwrap())
-        } else {
-            None
-        }
+        self.archive().get_file_group(dg.redirection)
     }
 
     pub fn child_packages(&self) -> TableSliceRef<'a, FilePackageChild> {
@@ -822,13 +858,6 @@ impl<'a> TableRef<'a, FilePackage> {
     }
 }
 
-impl<'a> TableMut<'a, FilePackage> {
-    pub fn set_info_range(&mut self, start: u32, count: u32) {
-        self.info_start = start;
-        self.info_count = count;
-    }
-}
-
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
 pub struct FilePackageChild(HashWithData);
@@ -836,6 +865,16 @@ pub struct FilePackageChild(HashWithData);
 impl FilePackageChild {
     pub fn new(path: Hash40, index: u32) -> Self {
         Self(HashWithData::new(path, index))
+    }
+
+    pub fn path(&self) -> Hash40 {
+        self.0.hash40()
+    }
+}
+
+impl<'a> TableRef<'a, FilePackageChild> {
+    pub fn package(&self) -> TableRef<'a, FilePackage> {
+        self.archive().get_file_package(self.0.data()).unwrap()
     }
 }
 
@@ -860,6 +899,14 @@ impl FileGroup {
             child_start: 0,
             redirection: 0xffffff,
         }
+    }
+
+    pub fn redirection(&self) -> u32 {
+        self.redirection
+    }
+
+    pub fn set_redirection(&mut self, redirection: u32) {
+        self.redirection = redirection;
     }
 
     pub fn compressed_size(&self) -> u32 {
