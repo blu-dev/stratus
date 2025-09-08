@@ -362,11 +362,6 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
     // SAFETY: This path is only going to be called from the ResInflateThread, so this being a "static" variable is effectively a TLS variable
     if let Some(file) = ReadOnlyFileSystem::file_system()
         .get_file(path)
-        .filter(|_| {
-            !info
-                .flags()
-                .intersects(FileInfoFlags::IS_LOCALIZED | FileInfoFlags::IS_REGIONAL)
-        })
     {
         // SAFETY: See above
         log::info!("[jemalloc_hook] Replacing {}", path.display());
@@ -560,11 +555,6 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
     // ResLoadingThread. It effectively becomes a function local variable
     if let Some(file) = ReadOnlyFileSystem::file_system()
         .get_file(path)
-        .filter(|_| {
-            !info
-                .flags()
-                .intersects(FileInfoFlags::IS_LOCALIZED | FileInfoFlags::IS_REGIONAL)
-        })
     {
         log::info!(
             "[process_single_patched_file_request] Replacing file {}",
@@ -837,7 +827,6 @@ fn initial_loading(_ctx: &InlineCtx) {
             now.elapsed().as_secs_f32()
         );
 
-        let now = std::time::Instant::now();
         let mut renamed = HashMap::new();
         let mut managed_groups = HashSet::new();
         for package_idx in 0..archive.num_file_package() as u32 {
@@ -874,32 +863,6 @@ fn initial_loading(_ctx: &InlineCtx) {
                 }
             }
         }
-        // for file in rename_cache {
-        //     let mut info = archive.get_file_info_mut(file).unwrap();
-        //     let file_path = info.path_ref().clone();
-
-        //     let new_fp_idx = info.archive_mut().insert_file_path(FilePath::from_parts(
-        //         file_path.path().const_with(".reshared"),
-        //         file_path.parent(),
-        //         file_path.file_name(),
-        //         file_path.extension(),
-        //         file_path.path_and_entity.data(),
-        //     ));
-
-        //     println!(
-        //         "Processing {} ({:#x?})",
-        //         file_path.path().display(),
-        //         info.desc_ref().load_method() // original_info.display()
-        //     );
-        //     info.set_path(new_fp_idx);
-        //     info.set_as_reshared();
-        //     info.desc()
-        //         .set_load_method(FileLoadMethod::PackageSkip(file));
-        // }
-        println!(
-            "[stratus::patching] Renamed group-shared files in {:.3}s",
-            now.elapsed().as_secs_f32()
-        );
 
         let now = std::time::Instant::now();
         for (path, file) in ReadOnlyFileSystem::file_system().files() {
@@ -916,19 +879,6 @@ fn initial_loading(_ctx: &InlineCtx) {
                         .try_file_path()
                         .unwrap()
                         .path();
-
-                    if archive
-                        .get_file_info(unshare_info.real_infos[0].1)
-                        .unwrap()
-                        .flags()
-                        .intersects(FileInfoFlags::IS_REGIONAL | FileInfoFlags::IS_LOCALIZED)
-                    {
-                        log::info!(
-                            "Skipping {} because it is localized/regional",
-                            path_hash.display()
-                        );
-                        continue;
-                    }
 
                     log::info!(
                         "Unsharing {} from {}",
@@ -985,6 +935,7 @@ fn initial_loading(_ctx: &InlineCtx) {
                     flags.set(FileInfoFlags::IS_SHARED, false);
                     flags.set(FileInfoFlags::IS_UNKNOWN_FLAG, false);
                     first_info.set_flags(flags);
+                    first_info.set_non_localized();
                     first_info.set_entity(new_entity_idx);
                     first_info.set_desc(new_desc_idx);
                     first_info.path_mut().set_entity(new_entity_idx);
@@ -997,6 +948,7 @@ fn initial_loading(_ctx: &InlineCtx) {
                         flags.set(FileInfoFlags::IS_SHARED, true);
                         flags.set(FileInfoFlags::IS_UNKNOWN_FLAG, true);
                         info.set_flags(flags);
+                        info.set_non_localized();
                         info.desc_mut()
                             .set_load_method(FileLoadMethod::Unowned(new_entity_idx));
                     }
@@ -1017,13 +969,6 @@ fn initial_loading(_ctx: &InlineCtx) {
                 } else {
                     let mut info_mut = path.entity_mut().info_mut();
 
-                    if info_mut
-                        .flags()
-                        .intersects(FileInfoFlags::IS_LOCALIZED | FileInfoFlags::IS_REGIONAL)
-                    {
-                        continue;
-                    }
-
                     if let Some(reshare_info) = reverse_unshare_cache.remove(&info_mut.index()) {
                         assert_eq!(info_mut.index(), info_mut.entity_ref().info().index());
                         let mut info = *info_mut;
@@ -1035,6 +980,7 @@ fn initial_loading(_ctx: &InlineCtx) {
                         let new_data_idx = archive.push_file_data(data);
                         desc.set_data(new_data_idx);
                         let new_desc_idx = archive.push_file_desc(desc);
+                        info.set_non_localized();
                         info.set_desc(new_desc_idx);
                         info.set_entity(archive.num_file_entity() as u32);
                         info.set_as_reshared();
@@ -1055,6 +1001,7 @@ fn initial_loading(_ctx: &InlineCtx) {
 
                             dependent_info.path_mut().set_entity(new_entity_idx);
                             dependent_info.set_entity(new_entity_idx);
+                            dependent_info.set_non_localized();
                             let mut dependent_desc = dependent_info.desc();
                             dependent_desc.set_load_method(FileLoadMethod::Unowned(new_entity_idx));
                         }

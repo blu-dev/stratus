@@ -6,7 +6,7 @@ use smash_hash::Hash40;
 
 use crate::{
     containers::{TableMut, TableRef, TableSliceRef},
-    HashDisplay,
+    HashDisplay, UserLocale,
 };
 
 pub trait IntoHash {
@@ -389,6 +389,24 @@ impl FileInfo {
         }
     }
 
+    pub fn is_regional(&self) -> bool {
+        self.flags.intersects(FileInfoFlags::IS_REGIONAL)
+    }
+
+    pub fn is_localized(&self) -> bool {
+        self.flags.intersects(FileInfoFlags::IS_LOCALIZED)
+    }
+
+    fn desc_index(&self) -> u32 {
+        if self.is_regional() {
+            self.desc + UserLocale::get().region as u32 + 1
+        } else if self.is_localized() {
+            self.desc + UserLocale::get().locale as u32 + 1
+        } else {
+            self.desc
+        }
+    }
+
     pub fn flags(&self) -> FileInfoFlags {
         self.flags
     }
@@ -421,7 +439,14 @@ impl FileInfo {
         self.entity = entity;
     }
 
+    #[track_caller]
     pub fn set_desc(&mut self, desc: u32) {
+        // We panic here because we should be very explicit about when we are making a file
+        // no-longer regional or localized. Simply doing it here swallows potential implementation
+        // errors
+        if self.flags.intersects(FileInfoFlags::IS_LOCALIZED | FileInfoFlags::IS_REGIONAL) {
+            panic!("Cannot set descriptor for localized/regional file, please set the file as non-localized first");
+        }
         self.desc = desc;
     }
 }
@@ -492,28 +517,17 @@ impl<'a> TableMut<'a, FileInfo> {
     }
 
     pub fn desc_ref(&self) -> TableRef<'_, FileDescriptor> {
-        let index = if self.flags.contains(FileInfoFlags::IS_LOCALIZED) {
-            self.desc + 2
-        } else {
-            self.desc
-        };
-
-        self.archive().get_file_desc(index).unwrap()
+        self.archive().get_file_desc(self.desc_index()).unwrap()
     }
 
     pub fn desc_mut(&mut self) -> TableMut<'_, FileDescriptor> {
-        let index = if self.flags.contains(FileInfoFlags::IS_LOCALIZED) {
-            self.desc + 2
-        } else {
-            self.desc
-        };
+        let index = self.desc_index();
 
         self.archive_mut().get_file_desc_mut(index).unwrap()
     }
 
     pub fn desc(self) -> TableMut<'a, FileDescriptor> {
-        // println!("{self:?} => {:?}", self.archive().get_file_path(self.path));
-        let index = self.desc;
+        let index = self.desc_index();
         self.into_archive_mut().get_file_desc_mut(index).unwrap()
     }
 }
