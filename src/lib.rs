@@ -21,7 +21,7 @@ use crate::{
     },
     discover::{FileSystem, NewFile},
     hash_interner::{DisplayHash, HashMemorySlab},
-    logger::NxKernelLogger,
+    logger::NxKernelLogger, mount_save::Language,
 };
 
 mod archive;
@@ -217,12 +217,14 @@ unsafe impl Sync for ReadOnlyArchive {}
 
 static ARCHIVE: OnceLock<ReadOnlyArchive> = OnceLock::new();
 
-pub struct UserLocale {
+#[derive(Debug, Copy, Clone)]
+pub struct LocalePreferences {
     pub region: Region,
-    pub locale: Locale
+    pub locale: Locale,
+    pub language: Language,
 }
 
-impl UserLocale {
+impl LocalePreferences {
     pub fn get() -> &'static Self {
         #[cfg(any(debug_assertions, feature = "sanity_checks"))]
         {
@@ -237,7 +239,7 @@ impl UserLocale {
     }
 }
 
-static LOCALE: OnceLock<UserLocale> = OnceLock::new();
+static LOCALE: OnceLock<LocalePreferences> = OnceLock::new();
 
 #[skyline::from_offset(0x392cc60)]
 fn jemalloc(size: u64, align: u64) -> *mut u8;
@@ -361,7 +363,7 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
 
     // SAFETY: This path is only going to be called from the ResInflateThread, so this being a "static" variable is effectively a TLS variable
     if let Some(file) = ReadOnlyFileSystem::file_system()
-        .get_file(path)
+        .get_file(path, *LocalePreferences::get())
     {
         // SAFETY: See above
         log::info!("[jemalloc_hook] Replacing {}", path.display());
@@ -554,7 +556,7 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
     // SAFETY: Referencing BUFFER here is safe since this is an inline hook only ever called from within
     // ResLoadingThread. It effectively becomes a function local variable
     if let Some(file) = ReadOnlyFileSystem::file_system()
-        .get_file(path)
+        .get_file(path, *LocalePreferences::get())
     {
         log::info!(
             "[process_single_patched_file_request] Replacing file {}",
@@ -865,8 +867,8 @@ fn initial_loading(_ctx: &InlineCtx) {
         }
 
         let now = std::time::Instant::now();
-        for (path, file) in ReadOnlyFileSystem::file_system().files() {
-            if let Some(path) = archive.lookup_file_path_mut(*path) {
+        for (path, file) in ReadOnlyFileSystem::file_system().files(*LocalePreferences::get()) {
+            if let Some(path) = archive.lookup_file_path_mut(path) {
                 let path_hash = path.path_and_entity.hash40();
 
                 if let Some(unshare_info) = unshare_cache.get(&path_hash) {

@@ -6,7 +6,7 @@ use smash_hash::Hash40;
 
 use crate::{
     containers::{TableMut, TableRef, TableSliceRef},
-    HashDisplay, UserLocale,
+    HashDisplay, LocalePreferences,
 };
 
 pub trait IntoHash {
@@ -80,6 +80,49 @@ pub enum Locale {
     Taiwanese,
 }
 
+impl Locale {
+    pub const COUNT: usize = 14;
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "ja_jp" => Some(Self::Japanese),
+            "us_en" => Some(Self::UsEnglish),
+            "us_fr" => Some(Self::UsFrench),
+            "us_es" => Some(Self::UsSpanish),
+            "eu_en" => Some(Self::EuEnglish),
+            "eu_fr" => Some(Self::EuFrench),
+            "eu_es" => Some(Self::EuSpanish),
+            "eu_de" => Some(Self::German),
+            "eu_nl" => Some(Self::Dutch),
+            "eu_it" => Some(Self::Italian),
+            "eu_ru" => Some(Self::Russian),
+            "kr_ko" => Some(Self::Korean),
+            "zh_cn" => Some(Self::Chinese),
+            "zh_tw" => Some(Self::Taiwanese),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Japanese => "ja_jp",
+            Self::UsEnglish => "us_en",
+            Self::UsFrench => "us_fr",
+            Self::UsSpanish => "us_es",
+            Self::EuEnglish => "eu_en",
+            Self::EuFrench => "eu_fr",
+            Self::EuSpanish => "eu_es",
+            Self::German => "eu_de",
+            Self::Dutch => "eu_nl",
+            Self::Italian => "eu_it",
+            Self::Russian => "eu_ru",
+            Self::Korean => "kr_ko",
+            Self::Chinese => "zh_cn",
+            Self::Taiwanese => "zh_tw",
+        }
+    }
+}
+
 #[repr(u32)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Region {
@@ -88,6 +131,31 @@ pub enum Region {
     Europe,
     Korea,
     China
+}
+
+impl Region {
+    pub const COUNT: usize = 5;
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "ja" => Some(Self::Japan),
+            "us" => Some(Self::NorthAmerica),
+            "eu" => Some(Self::Europe),
+            "kr" => Some(Self::Korea),
+            "zh" => Some(Self::China),
+            _ => None
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Japan => "ja",
+            Self::NorthAmerica => "us",
+            Self::Europe => "eu",
+            Self::Korea => "kr",
+            Self::China => "zh"
+        }
+    }
 }
 
 // Needs to be aligned on 4-bytes, smash_hash::Hash40 is aligned on 8
@@ -399,9 +467,9 @@ impl FileInfo {
 
     fn desc_index(&self) -> u32 {
         if self.is_regional() {
-            self.desc + UserLocale::get().region as u32 + 1
+            self.desc + LocalePreferences::get().region as u32 + 1
         } else if self.is_localized() {
-            self.desc + UserLocale::get().locale as u32 + 1
+            self.desc + LocalePreferences::get().locale as u32 + 1
         } else {
             self.desc
         }

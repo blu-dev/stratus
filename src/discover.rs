@@ -4,9 +4,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use smash_hash::{Hash40, Hash40Map};
 
 use crate::{
-    data::{FilePath, IntoHash},
-    hash_interner::{HashMemorySlab, InternerCache},
-    HashDisplay,
+    data::{FilePath, IntoHash, Locale, Region}, hash_interner::{HashMemorySlab, InternPathResult, InternerCache}, mount_save::Language, HashDisplay, LocalePreferences
 };
 
 const MODS_ROOT: &str = "sd:/ultimate/mods/";
@@ -37,9 +35,54 @@ fn discover_and_update_recursive(
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum Regional {
+    ByRegion(Region),
+    ByLanguage(Language),
+    ByLocale(Locale),
+}
+
+impl Regional {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ByRegion(region) => region.as_str(),
+            Self::ByLanguage(language) => language.as_str(),
+            Self::ByLocale(locale) => locale.as_str(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct DiscoveredFiles {
+    base_file: Option<DiscoveredFile>,
+    regions: [Option<DiscoveredFile>; Region::COUNT],
+    languages: [Option<DiscoveredFile>; Language::COUNT],
+    locales: [Option<DiscoveredFile>; Locale::COUNT],
+}
+
+impl DiscoveredFiles {
+    fn set_by_regional(&mut self, file: DiscoveredFile, regional: Option<Regional>) -> Option<DiscoveredFile> {
+        match regional {
+            Some(Regional::ByLocale(locale)) => self.locales[locale as usize].replace(file),
+            Some(Regional::ByLanguage(language)) => self.languages[language as usize].replace(file),
+            Some(Regional::ByRegion(region)) => self.regions[region as usize].replace(file),
+            None => self.base_file.replace(file),
+        }
+    }
+
+    fn with_preference(&self, preference: LocalePreferences) -> Option<&DiscoveredFile> {
+        self.locales[preference.locale as usize].as_ref()
+            .or_else(|| self.languages[preference.language as usize].as_ref())
+            .or_else(|| self.regions[preference.region as usize].as_ref())
+            .or(self.base_file.as_ref())
+    }
+}
+
+#[derive(Debug)]
 pub struct DiscoveredFile {
     root_idx: u32,
     size: u32,
+    regional: Option<Regional>,
     file: LoadableFile,
 }
 
@@ -65,7 +108,7 @@ pub struct NewFile {
 
 pub struct FileSystem {
     roots: Vec<Utf8PathBuf>,
-    files: Hash40Map<DiscoveredFile>,
+    files: Hash40Map<DiscoveredFiles>,
     pub new_files: Vec<NewFile>,
 }
 
@@ -89,24 +132,28 @@ impl FileSystem {
         }
     }
 
-    pub fn get_file(&self, hash: Hash40) -> Option<&DiscoveredFile> {
+    pub fn get_file(&self, hash: Hash40, preference: LocalePreferences) -> Option<&DiscoveredFile> {
         self.files.get(&hash)
+            .and_then(|files| files.with_preference(preference))
     }
 
     #[must_use = "This method can fail if the hash was not found"]
-    pub fn get_full_file_path(&self, hash: Hash40, buffer: &mut String) -> bool {
+    fn get_full_file_path(&self, hash: Hash40, file: &DiscoveredFile, buffer: &mut String) -> bool {
         use std::fmt::Write;
         buffer.clear();
 
-        let Some(file) = self.files.get(&hash) else {
-            return false;
-        };
         let _ = write!(
             buffer,
             "{}/{}",
             self.roots[file.root_idx as usize],
             hash.display()
         );
+
+        if let Some(regional) = file.regional.as_ref() {
+            let file_stem_end = buffer.rfind('.').unwrap();
+            buffer.insert(file_stem_end, '+');
+            buffer.insert_str(file_stem_end + 1, regional.as_str());
+        }
 
         true
     }
@@ -196,7 +243,7 @@ impl FileSystem {
         match &file.file {
             LoadableFile::UncompressedOnDisk => {
                 // TODO: Assert?
-                assert!(self.get_full_file_path(hash, filepath_buffer));
+                assert!(self.get_full_file_path(hash, file, filepath_buffer));
 
                 let size = file.size();
                 let buffer_ptr = unsafe {
@@ -205,6 +252,7 @@ impl FileSystem {
                 assert!(!buffer_ptr.is_null());
 
                 let buffer = unsafe { std::slice::from_raw_parts_mut(buffer_ptr, size as usize) };
+                println!("Loading {filepath_buffer}");
 
                 let mut file = std::fs::File::open(filepath_buffer).unwrap();
                 file.read_exact(buffer).unwrap();
@@ -222,8 +270,12 @@ impl FileSystem {
         }
     }
 
-    pub fn files(&self) -> impl IntoIterator<Item = (&Hash40, &DiscoveredFile)> {
+    pub fn files(&self, preference: LocalePreferences) -> impl IntoIterator<Item = (Hash40, &DiscoveredFile)> {
         self.files.iter()
+            .filter_map(move |(hash, files)| {
+                let file = files.with_preference(preference)?;
+                Some((*hash, file))
+            })
     }
 }
 
@@ -233,6 +285,66 @@ pub enum LoadableFile {
         zip: &'static rawzip::ZipArchive<rawzip::FileReader>,
         wayfinder: rawzip::ZipArchiveEntryWayfinder,
     },
+}
+
+impl std::fmt::Debug for LoadableFile {
+fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("LoadableFile")
+}}
+
+fn detect_regional_and_cache(
+    path: &Utf8Path,
+    hash: &mut HashMemorySlab,
+    cache: &mut InternerCache,
+    new_filepath_buffer: &mut String
+) -> (InternPathResult, Option<Regional>) {
+    let mut regional = None;
+    let mut filepath = path;
+    if let Some(file_stem) = path.file_stem() {
+        if let Some(pos) = file_stem.find('+') {
+            // +xx_yy locale indicator
+            if file_stem.len() - pos == 6 {
+                let locale = Locale::from_str(&file_stem[pos + 1..]).unwrap_or_else(|| panic!("Invalid locale suffix {} in file {}", &file_stem[pos + 1..], path));
+                regional = Some(Regional::ByLocale(locale));
+            }
+            // +xx region/language indicator
+            else if file_stem.len() - pos == 3 {
+                let substr = &file_stem[pos + 1..];
+                if let Some(language) = Language::from_str(substr) {
+                    regional = Some(Regional::ByLanguage(language));
+                } else if let Some(region) = Region::from_str(substr) {
+                    regional = Some(Regional::ByRegion(region));
+                } else {
+                    panic!("Invalid region/language suffix {} in file {}", substr, path);
+                }
+            } else {
+                panic!("Invalid region/locale indicator in file {}", path);
+            }
+            new_filepath_buffer.clear();
+            if let Some(parent) = path.parent() {
+                new_filepath_buffer.push_str(parent.as_str());
+                if !new_filepath_buffer.ends_with('/') {
+                    new_filepath_buffer.push('/');
+                }
+            }
+            new_filepath_buffer.push_str(&file_stem[..pos]);
+            if let Some(extension) = path.extension() {
+                new_filepath_buffer.push('.');
+                new_filepath_buffer.push_str(extension);
+            }
+            filepath = Utf8Path::new(new_filepath_buffer);
+        }
+    }
+
+    if let Some(file_name) = filepath.file_name() {
+        hash.intern_path(cache, Utf8Path::new(file_name));
+    }
+    if let Some(ext) = filepath.extension() {
+        hash.intern_path(cache, Utf8Path::new(ext));
+    }
+
+    let result = hash.intern_path(cache, filepath);
+    (result, regional)
 }
 
 pub fn discover_and_update_hashes(
@@ -245,6 +357,7 @@ pub fn discover_and_update_hashes(
         files: Hash40Map::default(),
         new_files: vec![],
     };
+    let mut modified_filepath_buffer = String::with_capacity(0x180);
 
     for folder in mods_root.read_dir_utf8().unwrap() {
         let root = folder.unwrap();
@@ -257,31 +370,40 @@ pub fn discover_and_update_hashes(
         if root.file_type().unwrap().is_dir() {
             let root_idx: u32 = file_system.roots.len().try_into().unwrap();
             file_system.roots.push(root.path().to_path_buf());
+            println!("Discovering in {}", root.path());
             discover_and_update_recursive(
                 root.path(),
                 root.path(),
                 &mut |file_path: &Utf8Path, len: u32| {
-                    if let Some(file_name) = file_path.file_name() {
-                        hash.intern_path(cache, Utf8Path::new(file_name));
-                    }
-                    if let Some(ext) = file_path.extension() {
-                        hash.intern_path(cache, Utf8Path::new(ext));
-                    }
-                    if hash.intern_path(cache, file_path).is_new {
+                    println!("\tDiscovered {file_path}");
+                    let (intern_result, regional) = detect_regional_and_cache(file_path, hash, cache, &mut modified_filepath_buffer);
+
+                    if intern_result.is_new {
+                        assert!(regional.is_none(), "New files cannot be regional");
                         file_system.new_files.push(NewFile {
                             filepath: FilePath::from_utf8_path(file_path),
-                            size: len,
-                        });
+                            size: len
+                        })
                     }
 
-                    file_system.files.insert(
-                        file_path.into_hash(),
-                        DiscoveredFile {
+                    let path = if regional.is_some() {
+                        Utf8Path::new(&modified_filepath_buffer)
+                    } else {
+                        file_path
+                    };
+
+                    let previous = file_system.files.entry(path.into_hash())
+                        .or_default()
+                        .set_by_regional(DiscoveredFile {
                             root_idx,
                             size: len,
+                            regional,
                             file: LoadableFile::UncompressedOnDisk,
-                        },
-                    );
+                        }, regional);
+
+                    if let Some(previous) = previous {
+                        panic!("Duplicate file discovered {}", file_path);
+                    }
                 },
             );
         } else if root.file_type().unwrap().is_file() && root.path().extension() == Some("zip") {
@@ -307,33 +429,35 @@ pub fn discover_and_update_hashes(
                 let path = Utf8Path::new(unsafe {
                     std::str::from_utf8_unchecked(entry.file_path().as_bytes())
                 });
-                if let Some(file_name) = path.file_name() {
-                    hash.intern_path(cache, Utf8Path::new(file_name));
-                }
-                if let Some(ext) = path.extension() {
-                    hash.intern_path(cache, Utf8Path::new(ext));
-                }
-
                 let size = entry.uncompressed_size_hint() as u32;
+                let (intern_result, regional) = detect_regional_and_cache(path, hash, cache, &mut modified_filepath_buffer);
 
-                if hash.intern_path(cache, path).is_new {
+                if intern_result.is_new {
+                    assert!(regional.is_none(), "New files cannot be regional");
                     file_system.new_files.push(NewFile {
                         filepath: FilePath::from_utf8_path(path),
-                        size,
-                    });
+                        size
+                    })
                 }
 
-                file_system.files.insert(
-                    path.into_hash(),
-                    DiscoveredFile {
+                let path = if regional.is_some() {
+                    Utf8Path::new(&modified_filepath_buffer)
+                } else {
+                    path
+                };
+
+                let previous = file_system.files.entry(path.into_hash())
+                    .or_default()
+                    .set_by_regional(DiscoveredFile {
                         root_idx,
                         size,
-                        file: LoadableFile::ZipFile {
-                            zip: archive,
-                            wayfinder: entry.wayfinder(),
-                        },
-                    },
-                );
+                        regional,
+                        file: LoadableFile::ZipFile { zip: archive, wayfinder: entry.wayfinder() },
+                    }, regional);
+
+                if let Some(previous) = previous {
+                    panic!("Duplicate file discovered {}", path);
+                }
             }
             println!(
                 "Processing rawzip took: {:.3}ms",
