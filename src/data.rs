@@ -61,6 +61,35 @@ impl IntoHash for u64 {
     }
 }
 
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Locale {
+    Japanese = 0,
+    UsEnglish,
+    UsFrench,
+    UsSpanish,
+    EuEnglish,
+    EuFrench,
+    EuSpanish,
+    German,
+    Dutch,
+    Italian,
+    Russian,
+    Korean,
+    Chinese,
+    Taiwanese,
+}
+
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Region {
+    Japan = 0,
+    NorthAmerica,
+    Europe,
+    Korea,
+    China
+}
+
 // Needs to be aligned on 4-bytes, smash_hash::Hash40 is aligned on 8
 #[repr(C)]
 #[derive(Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
@@ -1085,3 +1114,5 @@ impl<'a> TableMut<'a, SearchPathLink> {
         self.into_archive_mut().get_search_path_mut(index).unwrap()
     }
 }
+
+

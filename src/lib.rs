@@ -17,8 +17,7 @@ use smash_hash::{Hash40, Hash40Map, Hash40Set};
 use crate::{
     archive::{decompress_stream, Archive, ZstdBuffer},
     data::{
-        FileData, FileDescriptor, FileEntity, FileGroup, FileInfo, FileInfoFlags, FileLoadMethod,
-        FilePackage, FilePackageChild, FilePath, SearchFolder, SearchPath, TryFilePathResult,
+        FileData, FileDescriptor, FileEntity, FileGroup, FileInfo, FileInfoFlags, FileLoadMethod, FilePackage, FilePackageChild, FilePath, Locale, Region, SearchFolder, SearchPath, TryFilePathResult
     },
     discover::{FileSystem, NewFile},
     hash_interner::{DisplayHash, HashMemorySlab},
@@ -36,6 +35,7 @@ mod data;
 mod discover;
 mod hash_interner;
 mod logger;
+mod mount_save;
 
 const STRATUS_FOLDER: &str = "sd:/ultimate/stratus/";
 
@@ -216,6 +216,28 @@ unsafe impl Send for ReadOnlyArchive {}
 unsafe impl Sync for ReadOnlyArchive {}
 
 static ARCHIVE: OnceLock<ReadOnlyArchive> = OnceLock::new();
+
+pub struct UserLocale {
+    pub region: Region,
+    pub locale: Locale
+}
+
+impl UserLocale {
+    pub fn get() -> &'static Self {
+        #[cfg(any(debug_assertions, feature = "sanity_checks"))]
+        {
+            LOCALE.get().unwrap()
+        }
+        #[cfg(not(any(debug_assertions, feature = "sanity_checks")))]
+        {
+            // SAFETY: This is one of the first things we init, in release mode let's just declare the cold
+            //  path impossible to reach
+            unsafe { LOCALE.get().unwrap_unchecked() }
+        }
+    }
+}
+
+static LOCALE: OnceLock<UserLocale> = OnceLock::new();
 
 #[skyline::from_offset(0x392cc60)]
 fn jemalloc(size: u64, align: u64) -> *mut u8;
@@ -1325,6 +1347,8 @@ pub fn main() {
         );
     }));
 
+    mount_save::get_locale_from_user_save();
+
     logger::install_hooks();
 
     unsafe {
@@ -1335,6 +1359,11 @@ pub fn main() {
     init_folder();
     init_hashes();
     patch_res_threads();
+
+    LOCALE.get_or_init(|| {
+        mount_save::get_locale_from_user_save()
+    });
+
     let _ = log::set_logger(Box::leak(Box::new(NxKernelLogger::new())));
     unsafe { log::set_max_level_racy(LevelFilter::Info) };
 
