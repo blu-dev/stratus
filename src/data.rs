@@ -130,7 +130,7 @@ pub enum Region {
     NorthAmerica,
     Europe,
     Korea,
-    China
+    China,
 }
 
 impl Region {
@@ -143,7 +143,7 @@ impl Region {
             "eu" => Some(Self::Europe),
             "kr" => Some(Self::Korea),
             "zh" => Some(Self::China),
-            _ => None
+            _ => None,
         }
     }
 
@@ -153,7 +153,7 @@ impl Region {
             Self::NorthAmerica => "us",
             Self::Europe => "eu",
             Self::Korea => "kr",
-            Self::China => "zh"
+            Self::China => "zh",
         }
     }
 }
@@ -512,7 +512,10 @@ impl FileInfo {
         // We panic here because we should be very explicit about when we are making a file
         // no-longer regional or localized. Simply doing it here swallows potential implementation
         // errors
-        if self.flags.intersects(FileInfoFlags::IS_LOCALIZED | FileInfoFlags::IS_REGIONAL) {
+        if self
+            .flags
+            .intersects(FileInfoFlags::IS_LOCALIZED | FileInfoFlags::IS_REGIONAL)
+        {
             panic!("Cannot set descriptor for localized/regional file, please set the file as non-localized first");
         }
         self.desc = desc;
@@ -797,7 +800,8 @@ impl FilePackage {
     }
 
     pub fn has_file_group(&self) -> bool {
-        (self.flags & (FilePackageFlags::HAS_SUB_PACKAGE | FilePackageFlags::IS_SYM_LINK)) == FilePackageFlags::HAS_SUB_PACKAGE
+        (self.flags & (FilePackageFlags::HAS_SUB_PACKAGE | FilePackageFlags::IS_SYM_LINK))
+            == FilePackageFlags::HAS_SUB_PACKAGE
     }
 
     pub fn has_sym_link(&self) -> bool {
@@ -829,7 +833,10 @@ impl<'a> TableRef<'a, FilePackage> {
     pub fn sym_link(&self) -> TableRef<'a, FilePackage> {
         assert!(self.has_sym_link());
 
-        let dg = self.archive().get_file_group(self.path_and_group.data()).unwrap();
+        let dg = self
+            .archive()
+            .get_file_group(self.path_and_group.data())
+            .unwrap();
 
         self.archive().get_file_package(dg.redirection).unwrap()
     }
@@ -1243,5 +1250,3 @@ impl<'a> TableMut<'a, SearchPathLink> {
         self.into_archive_mut().get_search_path_mut(index).unwrap()
     }
 }
-
-

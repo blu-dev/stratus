@@ -4,7 +4,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use smash_hash::{Hash40, Hash40Map};
 
 use crate::{
-    data::{FilePath, IntoHash, Locale, Region}, hash_interner::{HashMemorySlab, InternPathResult, InternerCache}, mount_save::Language, HashDisplay, LocalePreferences
+    data::{FilePath, IntoHash, Locale, Region},
+    hash_interner::{HashMemorySlab, InternPathResult, InternerCache},
+    mount_save::Language,
+    HashDisplay, LocalePreferences,
 };
 
 const MODS_ROOT: &str = "sd:/ultimate/mods/";
@@ -61,7 +64,11 @@ struct DiscoveredFiles {
 }
 
 impl DiscoveredFiles {
-    fn set_by_regional(&mut self, file: DiscoveredFile, regional: Option<Regional>) -> Option<DiscoveredFile> {
+    fn set_by_regional(
+        &mut self,
+        file: DiscoveredFile,
+        regional: Option<Regional>,
+    ) -> Option<DiscoveredFile> {
         match regional {
             Some(Regional::ByLocale(locale)) => self.locales[locale as usize].replace(file),
             Some(Regional::ByLanguage(language)) => self.languages[language as usize].replace(file),
@@ -71,7 +78,8 @@ impl DiscoveredFiles {
     }
 
     fn with_preference(&self, preference: LocalePreferences) -> Option<&DiscoveredFile> {
-        self.locales[preference.locale as usize].as_ref()
+        self.locales[preference.locale as usize]
+            .as_ref()
             .or_else(|| self.languages[preference.language as usize].as_ref())
             .or_else(|| self.regions[preference.region as usize].as_ref())
             .or(self.base_file.as_ref())
@@ -133,7 +141,8 @@ impl FileSystem {
     }
 
     pub fn get_file(&self, hash: Hash40, preference: LocalePreferences) -> Option<&DiscoveredFile> {
-        self.files.get(&hash)
+        self.files
+            .get(&hash)
             .and_then(|files| files.with_preference(preference))
     }
 
@@ -270,12 +279,14 @@ impl FileSystem {
         }
     }
 
-    pub fn files(&self, preference: LocalePreferences) -> impl IntoIterator<Item = (Hash40, &DiscoveredFile)> {
-        self.files.iter()
-            .filter_map(move |(hash, files)| {
-                let file = files.with_preference(preference)?;
-                Some((*hash, file))
-            })
+    pub fn files(
+        &self,
+        preference: LocalePreferences,
+    ) -> impl IntoIterator<Item = (Hash40, &DiscoveredFile)> {
+        self.files.iter().filter_map(move |(hash, files)| {
+            let file = files.with_preference(preference)?;
+            Some((*hash, file))
+        })
     }
 }
 
@@ -288,15 +299,16 @@ pub enum LoadableFile {
 }
 
 impl std::fmt::Debug for LoadableFile {
-fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.write_str("LoadableFile")
-}}
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LoadableFile")
+    }
+}
 
 fn detect_regional_and_cache(
     path: &Utf8Path,
     hash: &mut HashMemorySlab,
     cache: &mut InternerCache,
-    new_filepath_buffer: &mut String
+    new_filepath_buffer: &mut String,
 ) -> (InternPathResult, Option<Regional>) {
     let mut regional = None;
     let mut filepath = path;
@@ -304,7 +316,13 @@ fn detect_regional_and_cache(
         if let Some(pos) = file_stem.find('+') {
             // +xx_yy locale indicator
             if file_stem.len() - pos == 6 {
-                let locale = Locale::from_str(&file_stem[pos + 1..]).unwrap_or_else(|| panic!("Invalid locale suffix {} in file {}", &file_stem[pos + 1..], path));
+                let locale = Locale::from_str(&file_stem[pos + 1..]).unwrap_or_else(|| {
+                    panic!(
+                        "Invalid locale suffix {} in file {}",
+                        &file_stem[pos + 1..],
+                        path
+                    )
+                });
                 regional = Some(Regional::ByLocale(locale));
             }
             // +xx region/language indicator
@@ -376,13 +394,18 @@ pub fn discover_and_update_hashes(
                 root.path(),
                 &mut |file_path: &Utf8Path, len: u32| {
                     println!("\tDiscovered {file_path}");
-                    let (intern_result, regional) = detect_regional_and_cache(file_path, hash, cache, &mut modified_filepath_buffer);
+                    let (intern_result, regional) = detect_regional_and_cache(
+                        file_path,
+                        hash,
+                        cache,
+                        &mut modified_filepath_buffer,
+                    );
 
                     if intern_result.is_new {
                         assert!(regional.is_none(), "New files cannot be regional");
                         file_system.new_files.push(NewFile {
                             filepath: FilePath::from_utf8_path(file_path),
-                            size: len
+                            size: len,
                         })
                     }
 
@@ -392,14 +415,19 @@ pub fn discover_and_update_hashes(
                         file_path
                     };
 
-                    let previous = file_system.files.entry(path.into_hash())
+                    let previous = file_system
+                        .files
+                        .entry(path.into_hash())
                         .or_default()
-                        .set_by_regional(DiscoveredFile {
-                            root_idx,
-                            size: len,
+                        .set_by_regional(
+                            DiscoveredFile {
+                                root_idx,
+                                size: len,
+                                regional,
+                                file: LoadableFile::UncompressedOnDisk,
+                            },
                             regional,
-                            file: LoadableFile::UncompressedOnDisk,
-                        }, regional);
+                        );
 
                     if let Some(previous) = previous {
                         panic!("Duplicate file discovered {}", file_path);
@@ -430,13 +458,14 @@ pub fn discover_and_update_hashes(
                     std::str::from_utf8_unchecked(entry.file_path().as_bytes())
                 });
                 let size = entry.uncompressed_size_hint() as u32;
-                let (intern_result, regional) = detect_regional_and_cache(path, hash, cache, &mut modified_filepath_buffer);
+                let (intern_result, regional) =
+                    detect_regional_and_cache(path, hash, cache, &mut modified_filepath_buffer);
 
                 if intern_result.is_new {
                     assert!(regional.is_none(), "New files cannot be regional");
                     file_system.new_files.push(NewFile {
                         filepath: FilePath::from_utf8_path(path),
-                        size
+                        size,
                     })
                 }
 
@@ -446,14 +475,22 @@ pub fn discover_and_update_hashes(
                     path
                 };
 
-                let previous = file_system.files.entry(path.into_hash())
+                let previous = file_system
+                    .files
+                    .entry(path.into_hash())
                     .or_default()
-                    .set_by_regional(DiscoveredFile {
-                        root_idx,
-                        size,
+                    .set_by_regional(
+                        DiscoveredFile {
+                            root_idx,
+                            size,
+                            regional,
+                            file: LoadableFile::ZipFile {
+                                zip: archive,
+                                wayfinder: entry.wayfinder(),
+                            },
+                        },
                         regional,
-                        file: LoadableFile::ZipFile { zip: archive, wayfinder: entry.wayfinder() },
-                    }, regional);
+                    );
 
                 if let Some(previous) = previous {
                     panic!("Duplicate file discovered {}", path);

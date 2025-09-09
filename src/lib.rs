@@ -17,11 +17,14 @@ use smash_hash::{Hash40, Hash40Map, Hash40Set};
 use crate::{
     archive::{decompress_stream, Archive, ZstdBuffer},
     data::{
-        FileData, FileDescriptor, FileEntity, FileGroup, FileInfo, FileInfoFlags, FileLoadMethod, FilePackage, FilePackageChild, FilePackageFlags, FilePath, Locale, Region, SearchFolder, SearchPath, TryFilePathResult
+        FileData, FileDescriptor, FileEntity, FileGroup, FileInfo, FileInfoFlags, FileLoadMethod,
+        FilePackage, FilePackageChild, FilePackageFlags, FilePath, Locale, Region, SearchFolder,
+        SearchPath, TryFilePathResult,
     },
     discover::{FileSystem, NewFile},
     hash_interner::{DisplayHash, HashMemorySlab},
-    logger::NxKernelLogger, mount_save::Language,
+    logger::NxKernelLogger,
+    mount_save::Language,
 };
 
 mod archive;
@@ -34,6 +37,7 @@ mod data;
 
 mod discover;
 mod hash_interner;
+mod kirby_copy;
 mod logger;
 mod mount_save;
 
@@ -362,8 +366,7 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
     }
 
     // SAFETY: This path is only going to be called from the ResInflateThread, so this being a "static" variable is effectively a TLS variable
-    if let Some(file) = ReadOnlyFileSystem::file_system()
-        .get_file(path, *LocalePreferences::get())
+    if let Some(file) = ReadOnlyFileSystem::file_system().get_file(path, *LocalePreferences::get())
     {
         // SAFETY: See above
         log::info!("[jemalloc_hook] Replacing {}", path.display());
@@ -555,8 +558,7 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
 
     // SAFETY: Referencing BUFFER here is safe since this is an inline hook only ever called from within
     // ResLoadingThread. It effectively becomes a function local variable
-    if let Some(file) = ReadOnlyFileSystem::file_system()
-        .get_file(path, *LocalePreferences::get())
+    if let Some(file) = ReadOnlyFileSystem::file_system().get_file(path, *LocalePreferences::get())
     {
         log::info!(
             "[process_single_patched_file_request] Replacing file {}",
@@ -775,6 +777,19 @@ fn initial_loading(_ctx: &InlineCtx) {
         let mut reverse_unshare_cache: HashMap<u32, ReshareFileInfo> = HashMap::default();
         let mut unshare_secondary_cache: HashMap<u32, Vec<u32>> = HashMap::default();
 
+        for file_package in archive.iter_file_package() {
+            println!("{}", file_package.path().display());
+            for child in file_package.child_packages() {
+                println!("\tPackage: {}", child.path().display());
+            }
+            if file_package.has_sym_link() {
+                println!("\tSymlink: {}", file_package.sym_link().path().display());
+            }
+            for info in file_package.infos() {
+                println!("\tFile: {}", info.file_path().path().display());
+            }
+        }
+
         let mario_c00 = archive.lookup_file_package("fighter/luigi/c01").unwrap();
 
         println!("{mario_c00:?}");
@@ -797,7 +812,9 @@ fn initial_loading(_ctx: &InlineCtx) {
         let src_package = archive.lookup_file_package("fighter/luigi/c01").unwrap();
         let src_info_range = src_package.infos().range();
         let src_child_range = src_package.child_packages().range();
-        let file_group_idx = src_package.has_file_group().then(|| src_package.file_group().unwrap().index());
+        let file_group_idx = src_package
+            .has_file_group()
+            .then(|| src_package.file_group().unwrap().index());
         let src_package = *src_package;
 
         let mut data_group = FileGroup::new_for_new_package();
@@ -807,7 +824,8 @@ fn initial_loading(_ctx: &InlineCtx) {
         }
 
         let new_dg_idx = archive.push_file_group(data_group);
-        let mut new_package = FilePackage::new("fighter/luigi/c08", "c08", "fighter/luigi", new_dg_idx);
+        let mut new_package =
+            FilePackage::new("fighter/luigi/c08", "c08", "fighter/luigi", new_dg_idx);
 
         let new_info_range_start = archive.num_file_info() as u32;
         let new_info_range_count = src_info_range.len() as u32;
@@ -828,15 +846,35 @@ fn initial_loading(_ctx: &InlineCtx) {
             let parent = *archive.lookup_search_path(src_parent_path).unwrap();
             // parent is a cXX folder, we need to recreate this in the search section
             if parent.name() == src_package.name() {
-                let new_parent_path = parent.parent().const_with("/").const_with_hash(new_package.name());
-                let new_search_path = SearchPath::new(new_parent_path.const_with("/").const_with_hash(src_path.file_name()), new_parent_path, src_path.file_name(), src_path.extension());
+                let new_parent_path = parent
+                    .parent()
+                    .const_with("/")
+                    .const_with_hash(new_package.name());
+                let new_search_path = SearchPath::new(
+                    new_parent_path
+                        .const_with("/")
+                        .const_with_hash(src_path.file_name()),
+                    new_parent_path,
+                    src_path.file_name(),
+                    src_path.extension(),
+                );
                 let new_search_path_idx = archive.insert_search_path(new_search_path);
 
-                let mut parent = if let Some(parent) = archive.lookup_search_folder_mut(new_parent_path) {
+                let mut parent = if let Some(parent) =
+                    archive.lookup_search_folder_mut(new_parent_path)
+                {
                     parent
                 } else {
-                    let new_parent_path = SearchPath::new_folder(new_parent_path, parent.parent(), new_package.name());
-                    let new_parent_folder = SearchFolder::new(new_parent_path.path(), parent.parent(), new_package.name());
+                    let new_parent_path = SearchPath::new_folder(
+                        new_parent_path,
+                        parent.parent(),
+                        new_package.name(),
+                    );
+                    let new_parent_folder = SearchFolder::new(
+                        new_parent_path.path(),
+                        parent.parent(),
+                        new_package.name(),
+                    );
                     let new_folder_idx = archive.insert_search_folder(new_parent_folder);
                     let new_parent_index = archive.insert_search_path(new_parent_path);
                     let grandparent = archive.lookup_search_folder_mut(parent.parent()).unwrap();
@@ -857,7 +895,7 @@ fn initial_loading(_ctx: &InlineCtx) {
                     while !child.is_end() {
                         child = child.next();
                     }
-                    
+
                     child.set_next_index(new_search_path_idx);
                 } else {
                     parent.set_first_child_index(new_search_path_idx);
@@ -876,7 +914,13 @@ fn initial_loading(_ctx: &InlineCtx) {
                 out_new_parent = parent.path().const_with("/");
                 out_new_file_name = src_path // vomit
                     .file_name()
-                    .const_trim_trailing(hashes.components_for(src_path.extension()).unwrap().next().unwrap())
+                    .const_trim_trailing(
+                        hashes
+                            .components_for(src_path.extension())
+                            .unwrap()
+                            .next()
+                            .unwrap(),
+                    )
                     .const_trim_trailing(".")
                     .const_trim_trailing("c01")
                     .const_with("c08")
@@ -884,7 +928,12 @@ fn initial_loading(_ctx: &InlineCtx) {
                     .const_with_hash(src_path.extension());
                 out_new_path = out_new_parent.const_with_hash(out_new_file_name);
 
-                let new_search_path = SearchPath::new(out_new_path, parent.path(), out_new_file_name, src_path.extension());
+                let new_search_path = SearchPath::new(
+                    out_new_path,
+                    parent.path(),
+                    out_new_file_name,
+                    src_path.extension(),
+                );
                 let new_path_idx = archive.insert_search_path(new_search_path);
                 let parent = archive.lookup_search_folder_mut(parent.path()).unwrap();
                 let mut child = parent.first_child();
@@ -893,10 +942,19 @@ fn initial_loading(_ctx: &InlineCtx) {
                 }
                 child.set_next_index(new_path_idx);
             } else {
-                panic!("Invalid parent path {} for package cloning", parent.path().display());
+                panic!(
+                    "Invalid parent path {} for package cloning",
+                    parent.path().display()
+                );
             }
 
-            let new_path = FilePath::from_parts(out_new_path, out_new_parent, out_new_file_name, src_path.file_name(), src_entity);
+            let new_path = FilePath::from_parts(
+                out_new_path,
+                out_new_parent,
+                out_new_file_name,
+                src_path.file_name(),
+                src_entity,
+            );
             let new_path_idx = archive.insert_file_path(new_path);
             let new_data_idx = archive.push_file_data(new_data);
             // If the current behavior is to load from the shared group, then that's what we will
@@ -914,7 +972,9 @@ fn initial_loading(_ctx: &InlineCtx) {
             archive.push_file_info(new_info);
         }
 
-        new_package.set_flags(src_package.flags() & !(FilePackageFlags::IS_LOCALIZED | FilePackageFlags::IS_REGIONAL));
+        new_package.set_flags(
+            src_package.flags() & !(FilePackageFlags::IS_LOCALIZED | FilePackageFlags::IS_REGIONAL),
+        );
         new_package.set_info_range(new_info_range_start, new_info_range_count);
 
         let new_child_range_start = archive.num_file_package_child() as u32;
@@ -928,16 +988,22 @@ fn initial_loading(_ctx: &InlineCtx) {
             let src_data_group = *package.data_group();
             let mut new_data_group = FileGroup::new_for_new_package();
 
-            assert!(package.flags().contains(FilePackageFlags::IS_SYM_LINK | FilePackageFlags::HAS_SUB_PACKAGE));
+            assert!(package
+                .flags()
+                .contains(FilePackageFlags::IS_SYM_LINK | FilePackageFlags::HAS_SUB_PACKAGE));
             let package = *package;
 
-            let symlink_package = archive.get_file_package(src_data_group.redirection()).unwrap();
+            let symlink_package = archive
+                .get_file_package(src_data_group.redirection())
+                .unwrap();
 
             // Symlink package is a cXX package, we gotta do something about that
             if symlink_package.name() == src_package.name() {
                 assert!(symlink_package.child_packages().is_empty());
-                assert!(!symlink_package.flags().contains(FilePackageFlags::HAS_SUB_PACKAGE));
-         
+                assert!(!symlink_package
+                    .flags()
+                    .contains(FilePackageFlags::HAS_SUB_PACKAGE));
+
                 let src_info_range = symlink_package.infos().range();
                 let src_child_range = symlink_package.child_packages().range();
                 // let file_group_idx = symlink_package.has_file_group().then(|| src_package.file_group().unwrap().index());
@@ -950,7 +1016,15 @@ fn initial_loading(_ctx: &InlineCtx) {
                 // }
 
                 let new_dg_idx = archive.push_file_group(data_group);
-                let mut new_package = FilePackage::new(src_package.parent().const_with("/").const_with_hash(new_package.name()), new_package.name(), src_package.parent(), new_dg_idx);
+                let mut new_package = FilePackage::new(
+                    src_package
+                        .parent()
+                        .const_with("/")
+                        .const_with_hash(new_package.name()),
+                    new_package.name(),
+                    src_package.parent(),
+                    new_dg_idx,
+                );
 
                 let new_info_range_start = archive.num_file_info() as u32;
                 let new_info_range_count = src_info_range.len() as u32;
@@ -971,18 +1045,39 @@ fn initial_loading(_ctx: &InlineCtx) {
                     let parent = *archive.lookup_search_path(src_parent_path).unwrap();
                     // parent is a cXX folder, we need to recreate this in the search section
                     if parent.name() == src_package.name() {
-                        let new_parent_path = parent.parent().const_with("/").const_with_hash(new_package.name());
-                        let new_search_path = SearchPath::new(new_parent_path.const_with("/").const_with_hash(src_path.file_name()), new_parent_path, src_path.file_name(), src_path.extension());
+                        let new_parent_path = parent
+                            .parent()
+                            .const_with("/")
+                            .const_with_hash(new_package.name());
+                        let new_search_path = SearchPath::new(
+                            new_parent_path
+                                .const_with("/")
+                                .const_with_hash(src_path.file_name()),
+                            new_parent_path,
+                            src_path.file_name(),
+                            src_path.extension(),
+                        );
                         let new_search_path_idx = archive.insert_search_path(new_search_path);
 
-                        let mut parent = if let Some(parent) = archive.lookup_search_folder_mut(new_parent_path) {
+                        let mut parent = if let Some(parent) =
+                            archive.lookup_search_folder_mut(new_parent_path)
+                        {
                             parent
                         } else {
-                            let new_parent_path = SearchPath::new_folder(new_parent_path, parent.parent(), new_package.name());
-                            let new_parent_folder = SearchFolder::new(new_parent_path.path(), parent.parent(), new_package.name());
+                            let new_parent_path = SearchPath::new_folder(
+                                new_parent_path,
+                                parent.parent(),
+                                new_package.name(),
+                            );
+                            let new_parent_folder = SearchFolder::new(
+                                new_parent_path.path(),
+                                parent.parent(),
+                                new_package.name(),
+                            );
                             let new_folder_idx = archive.insert_search_folder(new_parent_folder);
                             let new_parent_index = archive.insert_search_path(new_parent_path);
-                            let grandparent = archive.lookup_search_folder_mut(parent.parent()).unwrap();
+                            let grandparent =
+                                archive.lookup_search_folder_mut(parent.parent()).unwrap();
                             let mut child = grandparent.first_child();
                             while !child.is_end() {
                                 child = child.next();
@@ -1000,7 +1095,7 @@ fn initial_loading(_ctx: &InlineCtx) {
                             while !child.is_end() {
                                 child = child.next();
                             }
-                            
+
                             child.set_next_index(new_search_path_idx);
                         } else {
                             parent.set_first_child_index(new_search_path_idx);
@@ -1019,7 +1114,13 @@ fn initial_loading(_ctx: &InlineCtx) {
                         out_new_parent = parent.path().const_with("/");
                         out_new_file_name = src_path // vomit
                             .file_name()
-                            .const_trim_trailing(hashes.components_for(src_path.extension()).unwrap().next().unwrap())
+                            .const_trim_trailing(
+                                hashes
+                                    .components_for(src_path.extension())
+                                    .unwrap()
+                                    .next()
+                                    .unwrap(),
+                            )
                             .const_trim_trailing(".")
                             .const_trim_trailing("c01")
                             .const_with("c08")
@@ -1027,7 +1128,12 @@ fn initial_loading(_ctx: &InlineCtx) {
                             .const_with_hash(src_path.extension());
                         out_new_path = out_new_parent.const_with_hash(out_new_file_name);
 
-                        let new_search_path = SearchPath::new(out_new_path, parent.path(), out_new_file_name, src_path.extension());
+                        let new_search_path = SearchPath::new(
+                            out_new_path,
+                            parent.path(),
+                            out_new_file_name,
+                            src_path.extension(),
+                        );
                         let new_path_idx = archive.insert_search_path(new_search_path);
                         let parent = archive.lookup_search_folder_mut(parent.path()).unwrap();
                         let mut child = parent.first_child();
@@ -1036,10 +1142,19 @@ fn initial_loading(_ctx: &InlineCtx) {
                         }
                         child.set_next_index(new_path_idx);
                     } else {
-                        panic!("Invalid parent path {} for package cloning", parent.path().display());
+                        panic!(
+                            "Invalid parent path {} for package cloning",
+                            parent.path().display()
+                        );
                     }
 
-                    let new_path = FilePath::from_parts(out_new_path, out_new_parent, out_new_file_name, src_path.file_name(), src_entity);
+                    let new_path = FilePath::from_parts(
+                        out_new_path,
+                        out_new_parent,
+                        out_new_file_name,
+                        src_path.file_name(),
+                        src_entity,
+                    );
                     let new_path_idx = archive.insert_file_path(new_path);
                     let new_data_idx = archive.push_file_data(new_data);
                     // If the current behavior is to load from the shared group, then that's what we will
@@ -1053,7 +1168,9 @@ fn initial_loading(_ctx: &InlineCtx) {
                     new_info.set_non_localized();
                     new_info.set_desc(new_desc_idx);
                     let flags = new_info.flags();
-                    new_info.set_flags(flags | FileInfoFlags::IS_SHARED | FileInfoFlags::IS_UNKNOWN_FLAG);
+                    new_info.set_flags(
+                        flags | FileInfoFlags::IS_SHARED | FileInfoFlags::IS_UNKNOWN_FLAG,
+                    );
                     archive.push_file_info(new_info);
                 }
                 new_package.set_info_range(new_info_range_start, new_info_range_count);
@@ -1064,38 +1181,877 @@ fn initial_loading(_ctx: &InlineCtx) {
                 new_data_group.set_redirection(src_data_group.redirection());
             }
 
-
             let new_data_group_idx = archive.push_file_group(new_data_group);
-            let mut new_package = FilePackage::new(new_package.path().const_with("/").const_with_hash(package.name()), package.name(), new_package.path(), new_data_group_idx);
+            let mut new_package = FilePackage::new(
+                new_package
+                    .path()
+                    .const_with("/")
+                    .const_with_hash(package.name()),
+                package.name(),
+                new_package.path(),
+                new_data_group_idx,
+            );
             new_package.set_flags(package.flags());
             let new_package_idx = archive.insert_file_package(new_package);
-            archive.push_file_package_child(FilePackageChild::new(new_package.path(), new_package_idx));
+            archive.push_file_package_child(FilePackageChild::new(
+                new_package.path(),
+                new_package_idx,
+            ));
         }
 
         new_package.set_child_package_range(new_child_range_start, new_child_range_count);
 
         archive.insert_file_package(new_package);
 
-        let mario_c00 = archive.lookup_file_package("fighter/luigi/c08").unwrap();
+        let src_package = archive.lookup_file_package("fighter/kirby/c01").unwrap();
+        let src_info_range = src_package.infos().range();
+        let src_child_range = src_package.child_packages().range();
+        let file_group_idx = src_package
+            .has_file_group()
+            .then(|| src_package.file_group().unwrap().index());
+        let src_package = *src_package;
+
+        let mut data_group = FileGroup::new_for_new_package();
+
+        if let Some(file_group_idx) = file_group_idx {
+            data_group.set_redirection(file_group_idx);
+        }
+
+        let new_dg_idx = archive.push_file_group(data_group);
+        let mut new_package =
+            FilePackage::new("fighter/kirby/c08", "c08", "fighter/kirby", new_dg_idx);
+
+        let new_info_range_start = archive.num_file_info() as u32;
+        let new_info_range_count = src_info_range.len() as u32;
+
+        for src_info in src_info_range {
+            let src_info = archive.get_file_info(src_info).unwrap();
+            let new_data = *src_info.desc().data();
+            let mut new_desc = *src_info.desc();
+            let mut new_info = *src_info;
+            let src_entity = src_info.entity().index();
+            let src_path = *src_info.file_path();
+
+            let src_parent_path = src_path.parent().const_trim_trailing("/");
+
+            let out_new_parent;
+            let out_new_file_name;
+            let out_new_path;
+            let parent = *archive.lookup_search_path(src_parent_path).unwrap();
+            // parent is a cXX folder, we need to recreate this in the search section
+            if parent.name() == src_package.name() {
+                let new_parent_path = parent
+                    .parent()
+                    .const_with("/")
+                    .const_with_hash(new_package.name());
+                let new_search_path = SearchPath::new(
+                    new_parent_path
+                        .const_with("/")
+                        .const_with_hash(src_path.file_name()),
+                    new_parent_path,
+                    src_path.file_name(),
+                    src_path.extension(),
+                );
+                let new_search_path_idx = archive.insert_search_path(new_search_path);
+
+                let mut parent = if let Some(parent) =
+                    archive.lookup_search_folder_mut(new_parent_path)
+                {
+                    parent
+                } else {
+                    let new_parent_path = SearchPath::new_folder(
+                        new_parent_path,
+                        parent.parent(),
+                        new_package.name(),
+                    );
+                    let new_parent_folder = SearchFolder::new(
+                        new_parent_path.path(),
+                        parent.parent(),
+                        new_package.name(),
+                    );
+                    let new_folder_idx = archive.insert_search_folder(new_parent_folder);
+                    let new_parent_index = archive.insert_search_path(new_parent_path);
+                    let grandparent = archive.lookup_search_folder_mut(parent.parent()).unwrap();
+                    let mut child = grandparent.first_child();
+                    while !child.is_end() {
+                        child = child.next();
+                    }
+
+                    child.set_next_index(new_parent_index);
+                    archive.get_search_folder_mut(new_folder_idx).unwrap()
+                };
+
+                let file_count = parent.file_count() + 1;
+                parent.set_file_count(file_count);
+
+                if parent.has_first_child() {
+                    let mut child = parent.first_child();
+                    while !child.is_end() {
+                        child = child.next();
+                    }
+
+                    child.set_next_index(new_search_path_idx);
+                } else {
+                    parent.set_first_child_index(new_search_path_idx);
+                }
+
+                out_new_parent = new_search_path.parent().const_with("/");
+                out_new_file_name = new_search_path.name();
+                out_new_path = new_search_path.path();
+            }
+            // parent is not a cXX folder, special casing time!!!!
+            else if parent.path() == Hash40::const_new("sound/bank/fighter")
+                || parent.path() == Hash40::const_new("sound/bank/fighter_voice")
+            {
+                let hashes = ReadOnlyFileSystem::hashes();
+
+                out_new_parent = parent.path().const_with("/");
+                out_new_file_name = src_path // vomit
+                    .file_name()
+                    .const_trim_trailing(
+                        hashes
+                            .components_for(src_path.extension())
+                            .unwrap()
+                            .next()
+                            .unwrap(),
+                    )
+                    .const_trim_trailing(".")
+                    .const_trim_trailing("c01")
+                    .const_with("c08")
+                    .const_with(".")
+                    .const_with_hash(src_path.extension());
+                out_new_path = out_new_parent.const_with_hash(out_new_file_name);
+
+                let new_search_path = SearchPath::new(
+                    out_new_path,
+                    parent.path(),
+                    out_new_file_name,
+                    src_path.extension(),
+                );
+                let new_path_idx = archive.insert_search_path(new_search_path);
+                let parent = archive.lookup_search_folder_mut(parent.path()).unwrap();
+                let mut child = parent.first_child();
+                while !child.is_end() {
+                    child = child.next();
+                }
+                child.set_next_index(new_path_idx);
+            } else {
+                panic!(
+                    "Invalid parent path {} for package cloning",
+                    parent.path().display()
+                );
+            }
+
+            let new_path = FilePath::from_parts(
+                out_new_path,
+                out_new_parent,
+                out_new_file_name,
+                src_path.file_name(),
+                src_entity,
+            );
+            let new_path_idx = archive.insert_file_path(new_path);
+            let new_data_idx = archive.push_file_data(new_data);
+            // If the current behavior is to load from the shared group, then that's what we will
+            // do, otherwise tell the game that it's a normal shared file
+            if !new_desc.load_method().is_skip() {
+                new_desc.set_load_method(FileLoadMethod::Unowned(src_entity));
+            }
+            new_desc.set_data(new_data_idx);
+            let new_desc_idx = archive.push_file_desc(new_desc);
+            new_info.set_path(new_path_idx);
+            new_info.set_non_localized();
+            new_info.set_desc(new_desc_idx);
+            let flags = new_info.flags();
+            new_info.set_flags(flags | FileInfoFlags::IS_SHARED | FileInfoFlags::IS_UNKNOWN_FLAG);
+            archive.push_file_info(new_info);
+        }
+
+        new_package.set_flags(
+            src_package.flags() & !(FilePackageFlags::IS_LOCALIZED | FilePackageFlags::IS_REGIONAL),
+        );
+        new_package.set_info_range(new_info_range_start, new_info_range_count);
+
+        let new_child_range_start = archive.num_file_package_child() as u32;
+        let new_child_range_count = src_child_range.len() as u32;
+
+        for child in src_child_range {
+            let child_package = archive.get_file_package_child(child).unwrap();
+            let package = child_package.package();
+            assert_eq!(package.parent(), src_package.path());
+
+            let src_data_group = *package.data_group();
+            let mut new_data_group = FileGroup::new_for_new_package();
+
+            assert!(package
+                .flags()
+                .contains(FilePackageFlags::IS_SYM_LINK | FilePackageFlags::HAS_SUB_PACKAGE));
+            let package = *package;
+
+            let symlink_package = archive
+                .get_file_package(src_data_group.redirection())
+                .unwrap();
+
+            // Symlink package is a cXX package, we gotta do something about that
+            if symlink_package.name() == src_package.name() {
+                assert!(symlink_package.child_packages().is_empty());
+                assert!(!symlink_package
+                    .flags()
+                    .contains(FilePackageFlags::HAS_SUB_PACKAGE));
+
+                let src_info_range = symlink_package.infos().range();
+                let src_child_range = symlink_package.child_packages().range();
+                // let file_group_idx = symlink_package.has_file_group().then(|| src_package.file_group().unwrap().index());
+                let src_package = *symlink_package;
+
+                let data_group = FileGroup::new_for_new_package();
+
+                // if let Some(file_group_idx) = file_group_idx {
+                //     data_group.set_redirection(file_group_idx);
+                // }
+
+                let new_dg_idx = archive.push_file_group(data_group);
+                let mut new_package = FilePackage::new(
+                    src_package
+                        .parent()
+                        .const_with("/")
+                        .const_with_hash(new_package.name()),
+                    new_package.name(),
+                    src_package.parent(),
+                    new_dg_idx,
+                );
+
+                let new_info_range_start = archive.num_file_info() as u32;
+                let new_info_range_count = src_info_range.len() as u32;
+
+                for src_info in src_info_range {
+                    let src_info = archive.get_file_info(src_info).unwrap();
+                    let new_data = *src_info.desc().data();
+                    let mut new_desc = *src_info.desc();
+                    let mut new_info = *src_info;
+                    let src_entity = src_info.entity().index();
+                    let src_path = *src_info.file_path();
+
+                    let src_parent_path = src_path.parent().const_trim_trailing("/");
+
+                    let out_new_parent;
+                    let out_new_file_name;
+                    let out_new_path;
+                    let parent = *archive.lookup_search_path(src_parent_path).unwrap();
+                    // parent is a cXX folder, we need to recreate this in the search section
+                    if parent.name() == src_package.name() {
+                        let new_parent_path = parent
+                            .parent()
+                            .const_with("/")
+                            .const_with_hash(new_package.name());
+                        let new_search_path = SearchPath::new(
+                            new_parent_path
+                                .const_with("/")
+                                .const_with_hash(src_path.file_name()),
+                            new_parent_path,
+                            src_path.file_name(),
+                            src_path.extension(),
+                        );
+                        let new_search_path_idx = archive.insert_search_path(new_search_path);
+
+                        let mut parent = if let Some(parent) =
+                            archive.lookup_search_folder_mut(new_parent_path)
+                        {
+                            parent
+                        } else {
+                            let new_parent_path = SearchPath::new_folder(
+                                new_parent_path,
+                                parent.parent(),
+                                new_package.name(),
+                            );
+                            let new_parent_folder = SearchFolder::new(
+                                new_parent_path.path(),
+                                parent.parent(),
+                                new_package.name(),
+                            );
+                            let new_folder_idx = archive.insert_search_folder(new_parent_folder);
+                            let new_parent_index = archive.insert_search_path(new_parent_path);
+                            let grandparent =
+                                archive.lookup_search_folder_mut(parent.parent()).unwrap();
+                            let mut child = grandparent.first_child();
+                            while !child.is_end() {
+                                child = child.next();
+                            }
+
+                            child.set_next_index(new_parent_index);
+                            archive.get_search_folder_mut(new_folder_idx).unwrap()
+                        };
+
+                        let file_count = parent.file_count() + 1;
+                        parent.set_file_count(file_count);
+
+                        if parent.has_first_child() {
+                            let mut child = parent.first_child();
+                            while !child.is_end() {
+                                child = child.next();
+                            }
+
+                            child.set_next_index(new_search_path_idx);
+                        } else {
+                            parent.set_first_child_index(new_search_path_idx);
+                        }
+
+                        out_new_parent = new_search_path.parent().const_with("/");
+                        out_new_file_name = new_search_path.name();
+                        out_new_path = new_search_path.path();
+                    }
+                    // parent is not a cXX folder, special casing time!!!!
+                    else if parent.path() == Hash40::const_new("sound/bank/fighter")
+                        || parent.path() == Hash40::const_new("sound/bank/fighter_voice")
+                    {
+                        let hashes = ReadOnlyFileSystem::hashes();
+
+                        out_new_parent = parent.path().const_with("/");
+                        out_new_file_name = src_path // vomit
+                            .file_name()
+                            .const_trim_trailing(
+                                hashes
+                                    .components_for(src_path.extension())
+                                    .unwrap()
+                                    .next()
+                                    .unwrap(),
+                            )
+                            .const_trim_trailing(".")
+                            .const_trim_trailing("c01")
+                            .const_with("c08")
+                            .const_with(".")
+                            .const_with_hash(src_path.extension());
+                        out_new_path = out_new_parent.const_with_hash(out_new_file_name);
+
+                        let new_search_path = SearchPath::new(
+                            out_new_path,
+                            parent.path(),
+                            out_new_file_name,
+                            src_path.extension(),
+                        );
+                        let new_path_idx = archive.insert_search_path(new_search_path);
+                        let parent = archive.lookup_search_folder_mut(parent.path()).unwrap();
+                        let mut child = parent.first_child();
+                        while !child.is_end() {
+                            child = child.next();
+                        }
+                        child.set_next_index(new_path_idx);
+                    } else {
+                        panic!(
+                            "Invalid parent path {} for package cloning",
+                            parent.path().display()
+                        );
+                    }
+
+                    let new_path = FilePath::from_parts(
+                        out_new_path,
+                        out_new_parent,
+                        out_new_file_name,
+                        src_path.file_name(),
+                        src_entity,
+                    );
+                    let new_path_idx = archive.insert_file_path(new_path);
+                    let new_data_idx = archive.push_file_data(new_data);
+                    // If the current behavior is to load from the shared group, then that's what we will
+                    // do, otherwise tell the game that it's a normal shared file
+                    if !new_desc.load_method().is_skip() {
+                        new_desc.set_load_method(FileLoadMethod::Unowned(src_entity));
+                    }
+                    new_desc.set_data(new_data_idx);
+                    let new_desc_idx = archive.push_file_desc(new_desc);
+                    new_info.set_path(new_path_idx);
+                    new_info.set_non_localized();
+                    new_info.set_desc(new_desc_idx);
+                    let flags = new_info.flags();
+                    new_info.set_flags(
+                        flags | FileInfoFlags::IS_SHARED | FileInfoFlags::IS_UNKNOWN_FLAG,
+                    );
+                    archive.push_file_info(new_info);
+                }
+                new_package.set_info_range(new_info_range_start, new_info_range_count);
+                new_data_group.set_redirection(archive.insert_file_package(new_package));
+            }
+            // Not a cXX package!!! YIPPPPPPPPPPEEEEEEEEEEEEEEEEEEEE
+            else {
+                new_data_group.set_redirection(src_data_group.redirection());
+            }
+
+            let new_data_group_idx = archive.push_file_group(new_data_group);
+            let mut new_package = FilePackage::new(
+                new_package
+                    .path()
+                    .const_with("/")
+                    .const_with_hash(package.name()),
+                package.name(),
+                new_package.path(),
+                new_data_group_idx,
+            );
+            new_package.set_flags(package.flags());
+            let new_package_idx = archive.insert_file_package(new_package);
+            archive.push_file_package_child(FilePackageChild::new(
+                new_package.path(),
+                new_package_idx,
+            ));
+        }
+
+        new_package.set_child_package_range(new_child_range_start, new_child_range_count);
+
+        archive.insert_file_package(new_package);
+
+        let src_package = archive
+            .lookup_file_package("fighter/luigi/kirbycopy/c01")
+            .unwrap();
+        let src_info_range = src_package.infos().range();
+        let src_child_range = src_package.child_packages().range();
+        let file_group_idx = src_package
+            .has_file_group()
+            .then(|| src_package.file_group().unwrap().index());
+        let src_package = *src_package;
+
+        let mut data_group = FileGroup::new_for_new_package();
+
+        if let Some(file_group_idx) = file_group_idx {
+            data_group.set_redirection(file_group_idx);
+        }
+
+        let new_dg_idx = archive.push_file_group(data_group);
+        let mut new_package = FilePackage::new(
+            "fighter/luigi/kirbycopy/c08",
+            "c08",
+            "fighter/luigi/kirbycopy",
+            new_dg_idx,
+        );
+
+        let new_info_range_start = archive.num_file_info() as u32;
+        let new_info_range_count = src_info_range.len() as u32;
+
+        for src_info in src_info_range {
+            let src_info = archive.get_file_info(src_info).unwrap();
+            let new_data = *src_info.desc().data();
+            let mut new_desc = *src_info.desc();
+            let mut new_info = *src_info;
+            let src_entity = src_info.entity().index();
+            let src_path = *src_info.file_path();
+
+            let src_parent_path = src_path.parent().const_trim_trailing("/");
+
+            let out_new_parent;
+            let out_new_file_name;
+            let out_new_path;
+            let parent = *archive.lookup_search_path(src_parent_path).unwrap();
+            // parent is a cXX folder, we need to recreate this in the search section
+            if parent.name() == src_package.name() {
+                let new_parent_path = parent
+                    .parent()
+                    .const_with("/")
+                    .const_with_hash(new_package.name());
+                let new_search_path = SearchPath::new(
+                    new_parent_path
+                        .const_with("/")
+                        .const_with_hash(src_path.file_name()),
+                    new_parent_path,
+                    src_path.file_name(),
+                    src_path.extension(),
+                );
+                let new_search_path_idx = archive.insert_search_path(new_search_path);
+
+                let mut parent = if let Some(parent) =
+                    archive.lookup_search_folder_mut(new_parent_path)
+                {
+                    parent
+                } else {
+                    let new_parent_path = SearchPath::new_folder(
+                        new_parent_path,
+                        parent.parent(),
+                        new_package.name(),
+                    );
+                    let new_parent_folder = SearchFolder::new(
+                        new_parent_path.path(),
+                        parent.parent(),
+                        new_package.name(),
+                    );
+                    let new_folder_idx = archive.insert_search_folder(new_parent_folder);
+                    let new_parent_index = archive.insert_search_path(new_parent_path);
+                    let grandparent = archive.lookup_search_folder_mut(parent.parent()).unwrap();
+                    let mut child = grandparent.first_child();
+                    while !child.is_end() {
+                        child = child.next();
+                    }
+
+                    child.set_next_index(new_parent_index);
+                    archive.get_search_folder_mut(new_folder_idx).unwrap()
+                };
+
+                let file_count = parent.file_count() + 1;
+                parent.set_file_count(file_count);
+
+                if parent.has_first_child() {
+                    let mut child = parent.first_child();
+                    while !child.is_end() {
+                        child = child.next();
+                    }
+
+                    child.set_next_index(new_search_path_idx);
+                } else {
+                    parent.set_first_child_index(new_search_path_idx);
+                }
+
+                out_new_parent = new_search_path.parent().const_with("/");
+                out_new_file_name = new_search_path.name();
+                out_new_path = new_search_path.path();
+            }
+            // parent is not a cXX folder, special casing time!!!!
+            else if parent.path() == Hash40::const_new("sound/bank/fighter")
+                || parent.path() == Hash40::const_new("sound/bank/fighter_voice")
+            {
+                let hashes = ReadOnlyFileSystem::hashes();
+
+                out_new_parent = parent.path().const_with("/");
+                out_new_file_name = src_path // vomit
+                    .file_name()
+                    .const_trim_trailing(
+                        hashes
+                            .components_for(src_path.extension())
+                            .unwrap()
+                            .next()
+                            .unwrap(),
+                    )
+                    .const_trim_trailing(".")
+                    .const_trim_trailing("c01")
+                    .const_with("c08")
+                    .const_with(".")
+                    .const_with_hash(src_path.extension());
+                out_new_path = out_new_parent.const_with_hash(out_new_file_name);
+
+                let new_search_path = SearchPath::new(
+                    out_new_path,
+                    parent.path(),
+                    out_new_file_name,
+                    src_path.extension(),
+                );
+                let new_path_idx = archive.insert_search_path(new_search_path);
+                let parent = archive.lookup_search_folder_mut(parent.path()).unwrap();
+                let mut child = parent.first_child();
+                while !child.is_end() {
+                    child = child.next();
+                }
+                child.set_next_index(new_path_idx);
+            } else {
+                panic!(
+                    "Invalid parent path {} for package cloning",
+                    parent.path().display()
+                );
+            }
+
+            let new_path = FilePath::from_parts(
+                out_new_path,
+                out_new_parent,
+                out_new_file_name,
+                src_path.file_name(),
+                src_entity,
+            );
+            let new_path_idx = archive.insert_file_path(new_path);
+            let new_data_idx = archive.push_file_data(new_data);
+            // If the current behavior is to load from the shared group, then that's what we will
+            // do, otherwise tell the game that it's a normal shared file
+            if !new_desc.load_method().is_skip() {
+                new_desc.set_load_method(FileLoadMethod::Unowned(src_entity));
+            }
+            new_desc.set_data(new_data_idx);
+            let new_desc_idx = archive.push_file_desc(new_desc);
+            new_info.set_path(new_path_idx);
+            new_info.set_non_localized();
+            new_info.set_desc(new_desc_idx);
+            let flags = new_info.flags();
+            new_info.set_flags(flags | FileInfoFlags::IS_SHARED | FileInfoFlags::IS_UNKNOWN_FLAG);
+            archive.push_file_info(new_info);
+        }
+
+        new_package.set_flags(
+            src_package.flags() & !(FilePackageFlags::IS_LOCALIZED | FilePackageFlags::IS_REGIONAL),
+        );
+        new_package.set_info_range(new_info_range_start, new_info_range_count);
+
+        let new_child_range_start = archive.num_file_package_child() as u32;
+        let new_child_range_count = src_child_range.len() as u32;
+
+        for child in src_child_range {
+            let child_package = archive.get_file_package_child(child).unwrap();
+            let package = child_package.package();
+            assert_eq!(package.parent(), src_package.path());
+
+            let src_data_group = *package.data_group();
+            let mut new_data_group = FileGroup::new_for_new_package();
+
+            assert!(package
+                .flags()
+                .contains(FilePackageFlags::IS_SYM_LINK | FilePackageFlags::HAS_SUB_PACKAGE));
+            let package = *package;
+
+            let symlink_package = archive
+                .get_file_package(src_data_group.redirection())
+                .unwrap();
+
+            // Symlink package is a cXX package, we gotta do something about that
+            if symlink_package.name() == src_package.name() {
+                assert!(symlink_package.child_packages().is_empty());
+                assert!(!symlink_package
+                    .flags()
+                    .contains(FilePackageFlags::HAS_SUB_PACKAGE));
+
+                let src_info_range = symlink_package.infos().range();
+                let src_child_range = symlink_package.child_packages().range();
+                // let file_group_idx = symlink_package.has_file_group().then(|| src_package.file_group().unwrap().index());
+                let src_package = *symlink_package;
+
+                let data_group = FileGroup::new_for_new_package();
+
+                // if let Some(file_group_idx) = file_group_idx {
+                //     data_group.set_redirection(file_group_idx);
+                // }
+
+                let new_dg_idx = archive.push_file_group(data_group);
+                let mut new_package = FilePackage::new(
+                    src_package
+                        .parent()
+                        .const_with("/")
+                        .const_with_hash(new_package.name()),
+                    new_package.name(),
+                    src_package.parent(),
+                    new_dg_idx,
+                );
+
+                let new_info_range_start = archive.num_file_info() as u32;
+                let new_info_range_count = src_info_range.len() as u32;
+
+                for src_info in src_info_range {
+                    let src_info = archive.get_file_info(src_info).unwrap();
+                    let new_data = *src_info.desc().data();
+                    let mut new_desc = *src_info.desc();
+                    let mut new_info = *src_info;
+                    let src_entity = src_info.entity().index();
+                    let src_path = *src_info.file_path();
+
+                    let src_parent_path = src_path.parent().const_trim_trailing("/");
+
+                    let out_new_parent;
+                    let out_new_file_name;
+                    let out_new_path;
+                    let parent = *archive.lookup_search_path(src_parent_path).unwrap();
+                    // parent is a cXX folder, we need to recreate this in the search section
+                    if parent.name() == src_package.name() {
+                        let new_parent_path = parent
+                            .parent()
+                            .const_with("/")
+                            .const_with_hash(new_package.name());
+                        let new_search_path = SearchPath::new(
+                            new_parent_path
+                                .const_with("/")
+                                .const_with_hash(src_path.file_name()),
+                            new_parent_path,
+                            src_path.file_name(),
+                            src_path.extension(),
+                        );
+                        let new_search_path_idx = archive.insert_search_path(new_search_path);
+
+                        let mut parent = if let Some(parent) =
+                            archive.lookup_search_folder_mut(new_parent_path)
+                        {
+                            parent
+                        } else {
+                            let new_parent_path = SearchPath::new_folder(
+                                new_parent_path,
+                                parent.parent(),
+                                new_package.name(),
+                            );
+                            let new_parent_folder = SearchFolder::new(
+                                new_parent_path.path(),
+                                parent.parent(),
+                                new_package.name(),
+                            );
+                            let new_folder_idx = archive.insert_search_folder(new_parent_folder);
+                            let new_parent_index = archive.insert_search_path(new_parent_path);
+                            let grandparent =
+                                archive.lookup_search_folder_mut(parent.parent()).unwrap();
+                            let mut child = grandparent.first_child();
+                            while !child.is_end() {
+                                child = child.next();
+                            }
+
+                            child.set_next_index(new_parent_index);
+                            archive.get_search_folder_mut(new_folder_idx).unwrap()
+                        };
+
+                        let file_count = parent.file_count() + 1;
+                        parent.set_file_count(file_count);
+
+                        if parent.has_first_child() {
+                            let mut child = parent.first_child();
+                            while !child.is_end() {
+                                child = child.next();
+                            }
+
+                            child.set_next_index(new_search_path_idx);
+                        } else {
+                            parent.set_first_child_index(new_search_path_idx);
+                        }
+
+                        out_new_parent = new_search_path.parent().const_with("/");
+                        out_new_file_name = new_search_path.name();
+                        out_new_path = new_search_path.path();
+                    }
+                    // parent is not a cXX folder, special casing time!!!!
+                    else if parent.path() == Hash40::const_new("sound/bank/fighter")
+                        || parent.path() == Hash40::const_new("sound/bank/fighter_voice")
+                    {
+                        let hashes = ReadOnlyFileSystem::hashes();
+
+                        out_new_parent = parent.path().const_with("/");
+                        out_new_file_name = src_path // vomit
+                            .file_name()
+                            .const_trim_trailing(
+                                hashes
+                                    .components_for(src_path.extension())
+                                    .unwrap()
+                                    .next()
+                                    .unwrap(),
+                            )
+                            .const_trim_trailing(".")
+                            .const_trim_trailing("c01")
+                            .const_with("c08")
+                            .const_with(".")
+                            .const_with_hash(src_path.extension());
+                        out_new_path = out_new_parent.const_with_hash(out_new_file_name);
+
+                        let new_search_path = SearchPath::new(
+                            out_new_path,
+                            parent.path(),
+                            out_new_file_name,
+                            src_path.extension(),
+                        );
+                        let new_path_idx = archive.insert_search_path(new_search_path);
+                        let parent = archive.lookup_search_folder_mut(parent.path()).unwrap();
+                        let mut child = parent.first_child();
+                        while !child.is_end() {
+                            child = child.next();
+                        }
+                        child.set_next_index(new_path_idx);
+                    } else {
+                        panic!(
+                            "Invalid parent path {} for package cloning",
+                            parent.path().display()
+                        );
+                    }
+
+                    let new_path = FilePath::from_parts(
+                        out_new_path,
+                        out_new_parent,
+                        out_new_file_name,
+                        src_path.file_name(),
+                        src_entity,
+                    );
+                    let new_path_idx = archive.insert_file_path(new_path);
+                    let new_data_idx = archive.push_file_data(new_data);
+                    // If the current behavior is to load from the shared group, then that's what we will
+                    // do, otherwise tell the game that it's a normal shared file
+                    if !new_desc.load_method().is_skip() {
+                        new_desc.set_load_method(FileLoadMethod::Unowned(src_entity));
+                    }
+                    new_desc.set_data(new_data_idx);
+                    let new_desc_idx = archive.push_file_desc(new_desc);
+                    new_info.set_path(new_path_idx);
+                    new_info.set_non_localized();
+                    new_info.set_desc(new_desc_idx);
+                    let flags = new_info.flags();
+                    new_info.set_flags(
+                        flags | FileInfoFlags::IS_SHARED | FileInfoFlags::IS_UNKNOWN_FLAG,
+                    );
+                    archive.push_file_info(new_info);
+                }
+                new_package.set_info_range(new_info_range_start, new_info_range_count);
+                new_data_group.set_redirection(archive.insert_file_package(new_package));
+            }
+            // Not a cXX package!!! YIPPPPPPPPPPEEEEEEEEEEEEEEEEEEEE
+            else {
+                new_data_group.set_redirection(src_data_group.redirection());
+            }
+
+            let new_data_group_idx = archive.push_file_group(new_data_group);
+            let mut new_package = FilePackage::new(
+                new_package
+                    .path()
+                    .const_with("/")
+                    .const_with_hash(package.name()),
+                package.name(),
+                new_package.path(),
+                new_data_group_idx,
+            );
+            new_package.set_flags(package.flags());
+            let new_package_idx = archive.insert_file_package(new_package);
+            archive.push_file_package_child(FilePackageChild::new(
+                new_package.path(),
+                new_package_idx,
+            ));
+        }
+
+        new_package.set_child_package_range(new_child_range_start, new_child_range_count);
+
+        archive.insert_file_package(new_package);
+
+        println!("JUMPTOME");
+
+        let mario_c00 = archive
+            .lookup_file_package("fighter/luigi/kirbycopy/c08/cmn")
+            .unwrap();
+        println!("{mario_c00:?}");
+        println!("\tSymlink: {:?}", mario_c00.sym_link());
+
+        let mario_c00 = archive
+            .lookup_file_package("fighter/luigi/kirbycopy/c01/cmn")
+            .unwrap();
 
         println!("{mario_c00:?}");
+        println!("\tSymlink: {:?}", mario_c00.sym_link());
 
-        println!("Subpackages");
-        for child in mario_c00.child_packages() {
-            let child = child.package();
-            println!("\t{child:?}");
+        let mario_c00 = archive
+            .lookup_file_package("fighter/luigi/kirbycopy/c08/sound")
+            .unwrap();
+        println!("{mario_c00:?}");
+        println!("\tSymlink: {:?}", mario_c00.sym_link());
 
-            if child.has_sym_link() {
-                let symlink = child.sym_link();
-                println!("\t\t{symlink:?}");
-            }
-        }
+        let mario_c00 = archive
+            .lookup_file_package("fighter/luigi/kirbycopy/c01/sound")
+            .unwrap();
 
-        for info in mario_c00.infos() {
-            println!("\t{}", info.file_path().path().display());
-        }
+        println!("{mario_c00:?}");
+        println!("\tSymlink: {:?}", mario_c00.sym_link());
 
-        // panic!();
+        let mario_c00 = archive
+            .lookup_file_package("fighter/luigi/kirbycopy/c08/bodymotion")
+            .unwrap();
+        println!("{mario_c00:?}");
+        println!("\tSymlink: {:?}", mario_c00.sym_link());
+
+        let mario_c00 = archive
+            .lookup_file_package("fighter/luigi/kirbycopy/c01/bodymotion")
+            .unwrap();
+
+        println!("{mario_c00:?}");
+        println!("\tSymlink: {:?}", mario_c00.sym_link());
+
+        // println!("Subpackages");
+        // for child in mario_c00.child_packages() {
+        //     let child = child.package();
+        //     println!("\t{child:?}");
+        //
+        //     if child.has_sym_link() {
+        //         let symlink = child.sym_link();
+        //         println!("\t\t{symlink:?}");
+        //     }
+        // }
+        //
+        // for info in mario_c00.infos() {
+        //     println!("\t{}", info.file_path().path().display());
+        // }
 
         for package_idx in 0..archive.num_file_package() {
             let package = archive.get_file_package(package_idx as u32).unwrap();
@@ -1191,7 +2147,7 @@ fn initial_loading(_ctx: &InlineCtx) {
                 info.set_as_reshared();
                 info.desc()
                     .set_load_method(FileLoadMethod::PackageSkip(info_idx));
-        }
+            }
         }
 
         let now = std::time::Instant::now();
@@ -1349,6 +2305,7 @@ fn initial_loading(_ctx: &InlineCtx) {
 
         let mut new_packages_by_parent: Hash40Map<Hash40Set> = Hash40Map::default();
         let mut new_files_by_package: Hash40Map<Vec<&NewFile>> = Hash40Map::default();
+        // let mut new_files_no_package: Vec<&NewFile> = Vec::new();
 
         let now = std::time::Instant::now();
         for file in ReadOnlyFileSystem::file_system().new_files.iter() {
@@ -1382,7 +2339,12 @@ fn initial_loading(_ctx: &InlineCtx) {
                 "stage" => {
                     package = Some(file.filepath.parent().const_trim_trailing("/"));
                 }
-                _ => {}
+                "ui" => {
+                    package = Some(file.filepath.parent().const_trim_trailing("/"));
+                }
+                _ => {
+                    continue;
+                }
             }
 
             if let Some(package) = package {
@@ -1587,6 +2549,31 @@ fn initial_loading(_ctx: &InlineCtx) {
                 .unwrap()
                 .set_info_range(new_range_start, new_range_len);
         }
+
+        // for file in new_files_no_package {
+        //     let new_entity_idx =
+        //         archive.push_file_entity(FileEntity::new(0x0, 0xFFFFFF));
+        //     let mut filepath = file.filepath;
+        //     filepath.path_and_entity.set_data(new_entity_idx);
+        //     let new_file_path = archive.insert_file_path(filepath);
+        //     let new_data = archive.push_file_data(FileData::new_for_unsharing(file.size, 0));
+        //     let new_desc = archive.push_file_desc(FileDescriptor::new(
+        //         data_group,
+        //         new_data,
+        //         FileLoadMethod::Owned(0),
+        //     ));
+        //     let new_info = archive.push_file_info(FileInfo::new(
+        //         new_file_path,
+        //         new_entity_idx,
+        //         new_desc,
+        //         FileInfoFlags::IS_GRAPHICS_ARCHIVE,
+        //     ));
+        //     archive
+        //         .get_file_entity_mut(new_entity_idx)
+        //         .unwrap()
+        //         .set_info(new_info);
+        // }
+
         println!(
             "[stratus::patching] Added files in {:.3}s",
             now.elapsed().as_secs_f32()
@@ -1601,6 +2588,19 @@ fn initial_loading(_ctx: &InlineCtx) {
 
         ReadOnlyArchive(archive)
     });
+}
+
+#[skyline::hook(offset = 0x3543188, inline)]
+fn observe_load_package(ctx: &InlineCtx) {
+    let package_idx = ctx.registers[2].w();
+    let package = ReadOnlyArchive::get()
+        .get_file_package(package_idx)
+        .unwrap();
+    println!(
+        "[observe_package] Loading file package {} ({:?})",
+        package.path().display(),
+        package.flags()
+    );
 }
 
 #[skyline::main(name = "stratus")]
@@ -1636,10 +2636,9 @@ pub fn main() {
     init_folder();
     init_hashes();
     patch_res_threads();
+    kirby_copy::install();
 
-    LOCALE.get_or_init(|| {
-        mount_save::get_locale_from_user_save()
-    });
+    LOCALE.get_or_init(|| mount_save::get_locale_from_user_save());
 
     let _ = log::set_logger(Box::leak(Box::new(NxKernelLogger::new())));
     unsafe { log::set_max_level_racy(LevelFilter::Info) };
@@ -1660,5 +2659,6 @@ pub fn main() {
         process_single_patched_file_request,
         loading_thread_assign_patched_pointer,
         panic_set_invalid_state,
+        observe_load_package,
     );
 }
