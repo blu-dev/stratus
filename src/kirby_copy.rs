@@ -37,6 +37,8 @@ impl CopyAbilityCostumeInfo {
     }
 }
 
+// SAFETY: Everywhere this struct is accessed is guarded by a mutex in the CopyManager singleton
+// (unknown name). So accessing it is safe and should reduce on locking overhead from stratus
 static mut CUSTOM_COPY_INFO: [CustomCopyInfo; 0x18] = unsafe {
     [
         std::mem::zeroed(),
@@ -307,7 +309,6 @@ fn fighter_class(ctx: &mut InlineCtx) {
     let slot = ctx.registers[21].w();
 
     unsafe {
-        println!("fighter_class: {:#x} {:#x} {:#x}", copy_ptr, fighter, slot);
         if let Some(info) = CUSTOM_COPY_INFO.iter_mut().find(|info| {
             info.copy_module_ptr == copy_ptr && info.fighter == fighter && info.slot == slot
         }) {
@@ -327,10 +328,6 @@ fn kirby_fighter_class(ctx: &mut InlineCtx) {
     let slot = ctx.registers[21].w();
 
     unsafe {
-        println!(
-            "kirby_fighter_class: {:#x} {:#x} {:#x}",
-            copy_ptr, fighter, slot
-        );
         if let Some(info) = CUSTOM_COPY_INFO.iter_mut().find(|info| {
             info.copy_module_ptr == copy_ptr && info.fighter == fighter && info.slot == slot
         }) {
@@ -338,7 +335,6 @@ fn kirby_fighter_class(ctx: &mut InlineCtx) {
                 info.costume_info.base_addr()
                     - (std::mem::size_of::<CopyAbilityCostumeInfo>() as u64 * slot as u64 + 8),
             );
-            // ctx.registers[24].set_w(0);
         }
     }
 }
@@ -350,7 +346,6 @@ fn on_finalize_copy_ability(ctx: &mut InlineCtx) {
     let slot = ctx.registers[24].w();
 
     unsafe {
-        println!("Finalize: {copy_ptr:#x} {fighter:#x} {slot:#x}");
         if let Some(info) = CUSTOM_COPY_INFO.iter_mut().find(|info| {
             info.copy_module_ptr == copy_ptr && info.fighter == fighter && info.slot == slot
         }) {

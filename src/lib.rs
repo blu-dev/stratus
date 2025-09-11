@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet}, io::Read, ops::Deref, ptr::NonNull, sync::{
+    collections::{HashMap, HashSet}, ffi::CStr, io::Read, ops::Deref, ptr::NonNull, sync::{
         atomic::{AtomicBool, Ordering},
         OnceLock,
     }, time::Instant
@@ -11,18 +11,14 @@ use skyline::hooks::InlineCtx;
 use smash_hash::{Hash40, Hash40Map, Hash40Set};
 
 use crate::{
-    archive::{decompress_stream, Archive, ZstdBuffer},
-    data::{
-        FileData, FileDescriptor, FileEntity, FileGroup, FileInfo, FileInfoFlags, FileLoadMethod, FilePackage, FilePackageChild, FilePackageFlags, FilePath, IntoHash, Locale, Region, SearchFolder, SearchPath, TryFilePathResult
-    },
-    discover::{FileSystem, NewFile},
-    hash_interner::{DisplayHash, HashMemorySlab},
-    logger::NxKernelLogger,
-    mount_save::Language,
+    archive::{decompress_stream, Archive, ZstdBuffer}, data::{
+        FileData, FileDescriptor, FileEntity, FileGroup, FileInfo, FileInfoFlags, FileLoadMethod, FilePackage, FilePackageChild, FilePath, IntoHash, Locale, Region, SearchFolder, SearchPath, TryFilePathResult
+    }, filesystem::{Discovery, FileSystem}, hash_interner::{DisplayHash, HashMemorySlab}, logger::NxKernelLogger, mount_save::Language
 };
 
 mod archive;
 mod fixes;
+mod filesystem;
 
 #[allow(dead_code)]
 mod containers;
@@ -30,13 +26,15 @@ mod containers;
 #[allow(dead_code)]
 mod data;
 
-mod discover;
 mod hash_interner;
+
+#[allow(static_mut_refs)]
 mod kirby_copy;
 mod logger;
 mod mount_save;
 mod packages;
 
+const SKIP_CACHE: bool = true;
 const STRATUS_FOLDER: &str = "sd:/ultimate/stratus/";
 
 fn init_folder() {
@@ -121,6 +119,24 @@ fn init_hashes() {
         let blob_path: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/hashes.blob");
         let meta_path: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/hashes.meta");
         let hashes_src: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/Hashes_FullPath");
+        let cached_blob_path: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/hashes_cached.blob");
+        let cached_meta_path: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/hashes_cached.meta");
+        let cached_fs_blob_path: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/fs_cached.blob");
+
+        if cached_blob_path.exists()
+            && cached_meta_path.exists()
+            && cached_fs_blob_path.exists()
+            && !SKIP_CACHE
+        {
+            let slab = std::fs::read(cached_blob_path).unwrap();
+            let meta = std::fs::read(cached_meta_path).unwrap();
+            let fs_blob = std::fs::read(cached_fs_blob_path).unwrap();
+
+            return ReadOnlyFileSystem {
+                hashes: HashMemorySlab::from_blob(slab.into_boxed_slice(), meta.into_boxed_slice()),
+                file_system: FileSystem::from_bytes(fs_blob.into_boxed_slice())
+            };
+        }
 
         let now = Instant::now();
         let load_method: LoadMethod;
@@ -172,7 +188,7 @@ fn init_hashes() {
 
         let mut cache = slab.create_cache();
         let now = std::time::Instant::now();
-        let file_system = discover::discover_and_update_hashes(&mut slab, &mut cache);
+        let discovery = Discovery::new_in_root("sd:/ultimate/mods".as_ref(), &mut slab, &mut cache);
         println!(
             "[stratus::hashes] Discovered mod files in {:.3}s",
             now.elapsed().as_secs_f32()
@@ -188,6 +204,11 @@ fn init_hashes() {
         slab.intern_path(&mut cache, Utf8Path::new("nus3bank"));
         slab.intern_path(&mut cache, Utf8Path::new("nus3audio"));
         slab.finalize(cache);
+
+        let file_system = FileSystem::from_bytes(discovery.as_slab());
+        std::fs::write(cached_blob_path, slab.dump_blob()).unwrap();
+        std::fs::write(cached_meta_path, slab.dump_meta()).unwrap();
+        std::fs::write(cached_fs_blob_path, file_system.raw()).unwrap();
 
         ReadOnlyFileSystem {
             hashes: slab,
@@ -371,7 +392,7 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
     }
 
     // SAFETY: This path is only going to be called from the ResInflateThread, so this being a "static" variable is effectively a TLS variable
-    if let Some(file) = ReadOnlyFileSystem::file_system().get_file(path, *LocalePreferences::get())
+    if let Some(file) = ReadOnlyFileSystem::file_system().lookup_file(path, *LocalePreferences::get())
     {
         // SAFETY: See above
         log::info!("[jemalloc_hook] Replacing {}", path.display());
@@ -384,7 +405,7 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
         // and don't need to repeat the file IO here. The data_ptr should get replaced the next time that the game needs to load
         // something so we don't need to worry about other file loads reading from that pointer
         if unsafe { *res_service.add(0x234).cast::<u32>() == 0x4 } {
-            ptr = FileSystem::decompress_loaded_file(
+            ptr = ReadOnlyFileSystem::file_system().decompress_file(
                 file,
                 unsafe { NonNull::new_unchecked(*res_service.add(0x218).cast::<*mut u8>()) },
                 alignment as usize,
@@ -392,12 +413,12 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
             .as_ptr();
         } else {
             ptr = ReadOnlyFileSystem::file_system()
-                .load_file(
+                .read_file(
                     path,
                     file,
                     unsafe { &mut BUFFER },
-                    alignment as usize,
                     false,
+                    alignment as usize,
                 )
                 .as_ptr();
 
@@ -563,7 +584,7 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
 
     // SAFETY: Referencing BUFFER here is safe since this is an inline hook only ever called from within
     // ResLoadingThread. It effectively becomes a function local variable
-    if let Some(file) = ReadOnlyFileSystem::file_system().get_file(path, *LocalePreferences::get())
+    if let Some(file) = ReadOnlyFileSystem::file_system().lookup_file(path, *LocalePreferences::get())
     {
         log::info!(
             "[process_single_patched_file_request] Replacing file {}",
@@ -582,12 +603,12 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
         //      the lower 15 bits are used for buffer alignment
         let buffer_alignment = info.flags().bits() & 0x7FFF;
 
-        let ptr = ReadOnlyFileSystem::file_system().load_file(
+        let ptr = ReadOnlyFileSystem::file_system().read_file(
             path,
             file,
             unsafe { &mut BUFFER },
-            buffer_alignment as usize,
             true,
+            buffer_alignment as usize,
         );
 
         // SAFETY: See above
@@ -596,6 +617,7 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
 
         // // TODO: Should this be sanity?
         // assert_eq!(amount_read, size as usize);
+        let size = ReadOnlyFileSystem::file_system().get_decompressed_size(file);
 
         // OUT VARIABLES:
         // - x0 is supposed to be the return value of the vanilla read function.
@@ -603,8 +625,8 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
         //    of the pointer buffer, that way it accurately reflects the size of the pointer we are about to give the resource service
         // - x3 is the address of the instruction to jump to, we want to jump past the vanilla codepath so we add 4 (size of one instruction)
         //    to the cached address
-        ctx.registers[21].set_x(file.size() as u64);
-        ctx.registers[0].set_x(file.size() as u64);
+        ctx.registers[21].set_x(size as u64);
+        ctx.registers[0].set_x(size as u64);
         // SAFETY: See above on static mut variables
         ctx.registers[3].set_x(unsafe { OFFSET_ABSOLUTE_ADDRESS + 4 });
 
@@ -693,6 +715,8 @@ fn patch_res_threads() {
 
     // observe_decompression
     Patch::in_text(0x3544804).nop().unwrap();
+
+    Patch::in_text(0x17e0108).nop().unwrap();
 }
 
 extern "C" {
@@ -762,7 +786,7 @@ fn initial_loading(_ctx: &InlineCtx) {
         let now = std::time::Instant::now();
 
         let cache_crc_path = Utf8Path::new(STRATUS_FOLDER).join("fschecksum.bin");
-        if cache_crc_path.exists() {
+        if cache_crc_path.exists() && !SKIP_CACHE {
             let mut crc32 = [0u8; 4];
             let mut file = std::fs::File::open(&cache_crc_path).unwrap();
             file.read_exact(&mut crc32).unwrap();
@@ -808,109 +832,149 @@ fn initial_loading(_ctx: &InlineCtx) {
             dependents: Vec<u32>,
         }
 
-        let total_now = std::time::Instant::now();
         let mut unshare_cache = Hash40Map::default();
         let mut reverse_unshare_cache: HashMap<u32, ReshareFileInfo> = HashMap::default();
         let mut unshare_secondary_cache: HashMap<u32, Vec<u32>> = HashMap::default();
 
         let mut duplicated_fighter_packages: Hash40Map<Hash40Set> = Hash40Map::default();
         let mut new_packages_by_parent: Hash40Map<Hash40Set> = Hash40Map::default();
-        let mut new_files_by_package: Hash40Map<Vec<&NewFile>> = Hash40Map::default();
+        let mut new_files_by_package: Hash40Map<Vec<(FilePath, u32)>> = Hash40Map::default();
+
+        for package in archive.iter_file_package() {
+            println!("{} ({:?})", package.path().display(), package.flags());
+            if package.has_sym_link() {
+                println!("\tSYM: {} ({:?})", package.sym_link().path().display(), package.sym_link().flags());
+            }
+            println!("CHILDREN");
+            for child in package.child_packages() {
+                println!("\t:{} ({:?})", child.package().path().display(), child.package().flags());
+            }
+            println!("INFOS");
+            for info in package.infos() {
+                println!("\t{}", info.file_path().path().display());
+            }
+        }
+
+        archive.lookup_file_package_mut("fighter/samusd/result").unwrap().set_child_package_range(0, 0);
 
         let mut component_buffer = [""; 16];
         let hashes = ReadOnlyFileSystem::hashes();
-        for file in ReadOnlyFileSystem::file_system().new_files.iter() {
+        for (file, size) in ReadOnlyFileSystem::file_system().iter_file_sizes(*LocalePreferences::get()) {
             // Just means that the user didn't have a hashes file
-            if archive.lookup_file_path(file.filepath.path()).is_some() {
+            if archive.lookup_file_path(file).is_some() {
                 continue;
             }
 
             let package;
 
-            let component_count = hashes.buffer_str_components_for(file.filepath.path(), &mut component_buffer).unwrap();
+            let component_count = hashes.buffer_str_components_for(file, &mut component_buffer).unwrap();
 
-            if component_count > 0 {
-                match component_buffer[0] {
-                    "fighter" => {
-                        if component_count < 4 {
-                            continue;
-                        }
-
-                        let fighter_name = component_buffer[1];
-
-                        let slot = component_buffer[4];
-                        if slot.starts_with('c') {
-                            if !matches!(slot, "c00" | "c01" | "c02" | "c03" | "c04" | "c05" | "c06" | "c07") {
-                                duplicated_fighter_packages.entry(Hash40::const_new(fighter_name)).or_default().insert(Hash40::const_new(slot));
-                            }
-
-
-                            package = 
-                                Hash40::const_new("fighter")
-                                    .const_with("/")
-                                    .const_with(fighter_name)
-                                    .const_with("/")
-                                    .const_with(slot)
-                            ;
-                        } else {
-                            continue;
-                        }
-                    },
-                    "stage" => {
-                        package = file.filepath.parent().const_trim_trailing("/");
-                    },
-                    "ui" => {
-                        package = file.filepath.parent().const_trim_trailing("/");
-                    }, 
-                    _ => continue
-                }
-            } else {
+            if component_count == 0 {
                 continue;
             }
 
-                
-                if archive.lookup_file_package(package).is_none() {
-                    if component_buffer[0] == "stage"
-                        && component_count == 6 // stage / <stage> / <battle | normal> / <subfolder> / <new package name> / <file>
-                        && matches!(component_buffer[2], "battle" | "normal")
-                    {
-                        let mut parent_hash = Hash40::const_new("");
-                        for component in component_buffer.iter().take(4) {
-                            if parent_hash != Hash40::const_new("") {
-                                parent_hash = parent_hash.const_with("/");
-                            }
-                            parent_hash = parent_hash.const_with(component);
+            let mut parent = Hash40::const_new("");
+            for component in component_buffer.iter().take(component_count - 1) {
+                parent = parent.const_with(component).const_with("/");
+            }
+
+            let file_name = Hash40::const_new(component_buffer[component_count - 1]);
+            let Some((_, extension)) = component_buffer[component_count - 1].split_once('.') else {
+                continue;
+            };
+            let extension = Hash40::const_new(extension);
+
+            match component_buffer[0] {
+                "fighter" => {
+                    if component_count < 4 {
+                        continue;
+                    }
+
+                    let fighter_name = component_buffer[1];
+
+                    let slot = component_buffer[4];
+                    if slot.starts_with('c') {
+                        if !matches!(slot, "c00" | "c01" | "c02" | "c03" | "c04" | "c05" | "c06" | "c07") {
+                            duplicated_fighter_packages.entry(Hash40::const_new(fighter_name)).or_default().insert(Hash40::const_new(slot));
                         }
-                        new_packages_by_parent
-                            .entry(parent_hash)
-                            .or_default()
-                            .insert(Hash40::const_new(component_buffer[4]));
+
+
+                        package = 
+                            Hash40::const_new("fighter")
+                                .const_with("/")
+                                .const_with(fighter_name)
+                                .const_with("/")
+                                .const_with(slot)
+                        ;
                     } else {
                         continue;
                     }
-                }
+                },
+                "stage" => {
+                    package = parent.const_trim_trailing("/");
+                },
+                "ui" => {
+                    package = parent.const_trim_trailing("/");
+                }, 
+                _ => continue
+            }
 
-                new_files_by_package.entry(package).or_default().push(file);
+                
+            if archive.lookup_file_package(package).is_none() {
+                if component_buffer[0] == "stage"
+                    && component_count == 6 // stage / <stage> / <battle | normal> / <subfolder> / <new package name> / <file>
+                    && matches!(component_buffer[2], "battle" | "normal")
+                {
+                    let mut parent_hash = Hash40::const_new("");
+                    for component in component_buffer.iter().take(4) {
+                        if parent_hash != Hash40::const_new("") {
+                            parent_hash = parent_hash.const_with("/");
+                        }
+                        parent_hash = parent_hash.const_with(component);
+                    }
+                    new_packages_by_parent
+                        .entry(parent_hash)
+                        .or_default()
+                        .insert(Hash40::const_new(component_buffer[4]));
+                } else {
+                    continue;
+                }
+            }
+
+            new_files_by_package.entry(package).or_default().push((FilePath::from_parts(file, parent, file_name, extension, 0xFFFFFF), size));
         }
 
+        let mut retarget_buffer = Vec::new();
+
         for (fighter_name, new_costumes) in duplicated_fighter_packages {
+            if fighter_name == Hash40::const_new("common") {
+                continue;
+            }
             for new_costume in new_costumes {
-                packages::duplicate_fighter_costume_package(&mut archive, Hash40::const_new("fighter/").const_with_hash(fighter_name).const_with("/c00"), new_costume);
+                packages::duplicate_fighter_costume_package(&mut archive, fighter_name, Hash40::const_new("fighter/").const_with_hash(fighter_name).const_with("/c00"), new_costume);
+                if fighter_name == Hash40::const_new("samusd") {
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/samusd/result/c00".into_hash(), new_costume);
+                    retarget_buffer.push((
+                        Hash40::const_new("fighter/samusd/result/").const_with_hash(new_costume),
+                        Hash40::const_new("fighter/samusd/model/bunshin/").const_with_hash(new_costume),
+                        Hash40::const_new("fighter/samusd/model/body/").const_with_hash(new_costume),
+                    ))
+                }
                 if fighter_name == Hash40::const_new("kirby") {
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/mario/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/luigi/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/donkey/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/link/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/samus/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/samusd/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/yoshi/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/fox/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/pikachu/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/ness/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/captain/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/purin/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/peach/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, "fighter/pickel/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/mario/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/luigi/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/donkey/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/link/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/samus/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/samusd/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/yoshi/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/fox/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/pikachu/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/ness/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/captain/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/purin/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/peach/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/pickel/kirbycopy/c00".into_hash(), new_costume);
                 }
             }
         }
@@ -940,7 +1004,8 @@ fn initial_loading(_ctx: &InlineCtx) {
                     // To figure out which one of these it is, we look at the file descriptor's load method. The correct way would be
                     // to check if the index of the file info is >= the index of the first FileGroup's FileInfo. Perhaps at a later
                     // date we will do it that way
-                    if info.file_path().index() == shared_info.file_path().index() {
+                    if info.file_path().index() == shared_info.file_path().index() 
+                        || info.flags().intersects(FileInfoFlags::IS_RETARGETED) {
                         if shared_info.desc().load_method().is_skip() {
                             // rename_cache.insert(shared_info.index());
                         } else {
@@ -952,7 +1017,7 @@ fn initial_loading(_ctx: &InlineCtx) {
 
                     // group_offset = (group_offset + 0xf) & 0x10;
                     unshare_cache
-                        .entry(info.file_path().path_and_entity.hash40())
+                        .entry(info.file_path().path())
                         .or_insert_with(|| UnsharedFileInfo {
                             real_infos: vec![],
                             package_index: package.index(),
@@ -963,6 +1028,7 @@ fn initial_loading(_ctx: &InlineCtx) {
                 }
             }
         }
+
         println!(
             "[stratus::patching] Built unshare and rename cache in {:.3}s",
             now.elapsed().as_secs_f32()
@@ -1013,7 +1079,7 @@ fn initial_loading(_ctx: &InlineCtx) {
         }
 
         let now = std::time::Instant::now();
-        for (path, file) in ReadOnlyFileSystem::file_system().files(*LocalePreferences::get()) {
+        for (path, size) in ReadOnlyFileSystem::file_system().iter_file_sizes(*LocalePreferences::get()) {
             if let Some(path) = archive.lookup_file_path_mut(path) {
                 let path_hash = path.path_and_entity.hash40();
 
@@ -1047,7 +1113,7 @@ fn initial_loading(_ctx: &InlineCtx) {
                     }
 
                     let new_data_idx = archive.push_file_data(FileData::new_for_unsharing(
-                        file.size(),
+                        size,
                         unshare_info.group_offset,
                     ));
 
@@ -1156,10 +1222,24 @@ fn initial_loading(_ctx: &InlineCtx) {
                     }
 
                     let mut data = info_mut.desc().data_mut();
-                    data.patch(file.size());
+                    data.patch(size);
                 }
             }
         }
+
+        packages::retarget_files(&mut archive, "fighter/samusd/result/c00", "fighter/samusd/model/bunshin/c00", "fighter/samusd/model/body/c00");
+        packages::retarget_files(&mut archive, "fighter/samusd/result/c01", "fighter/samusd/model/bunshin/c01", "fighter/samusd/model/body/c01");
+        packages::retarget_files(&mut archive, "fighter/samusd/result/c02", "fighter/samusd/model/bunshin/c02", "fighter/samusd/model/body/c02");
+        packages::retarget_files(&mut archive, "fighter/samusd/result/c03", "fighter/samusd/model/bunshin/c03", "fighter/samusd/model/body/c03");
+        packages::retarget_files(&mut archive, "fighter/samusd/result/c04", "fighter/samusd/model/bunshin/c04", "fighter/samusd/model/body/c04");
+        packages::retarget_files(&mut archive, "fighter/samusd/result/c05", "fighter/samusd/model/bunshin/c05", "fighter/samusd/model/body/c05");
+        packages::retarget_files(&mut archive, "fighter/samusd/result/c06", "fighter/samusd/model/bunshin/c06", "fighter/samusd/model/body/c06");
+        packages::retarget_files(&mut archive, "fighter/samusd/result/c07", "fighter/samusd/model/bunshin/c07", "fighter/samusd/model/body/c07");
+
+        for (package, old_parent, new_parent) in retarget_buffer {
+            packages::retarget_files(&mut archive, package, old_parent, new_parent);
+        }
+
         println!(
             "[stratus::patching] Unshared files in {:.3}s",
             now.elapsed().as_secs_f32()
@@ -1222,7 +1302,7 @@ fn initial_loading(_ctx: &InlineCtx) {
                 continue;
             };
 
-                        let should_log = package_hash == Hash40::const_new("fighter/samus/c00");
+            let should_log = package_hash == Hash40::const_new("fighter/samus/c00");
 
             let file_info_range = package.infos().range();
 
@@ -1246,11 +1326,11 @@ fn initial_loading(_ctx: &InlineCtx) {
                 }
             }
 
-            for file in files {
-                if archive.lookup_file_path(file.filepath.path()).is_some() {
+            for (file, size) in files {
+                if archive.lookup_file_path(file.path()).is_some() {
                     continue;
                 }
-                let component_count = hashes.buffer_str_components_for(file.filepath.path(), &mut component_buffer).unwrap();
+                let component_count = hashes.buffer_str_components_for(file.path(), &mut component_buffer).unwrap();
                 let parent_components = component_count - 1;
                 let mut current_parent = Hash40::const_new("");
                 for component in component_buffer.iter().take(parent_components).copied() {
@@ -1295,7 +1375,7 @@ fn initial_loading(_ctx: &InlineCtx) {
 
                     current_parent = new_parent.const_with("/");
                 }
-                let search_path = SearchPath::from_file_path(&file.filepath);
+                let search_path = SearchPath::from_file_path(&file);
 
                 let new_index = archive.insert_search_path(search_path);
 
@@ -1318,10 +1398,10 @@ fn initial_loading(_ctx: &InlineCtx) {
 
                 let new_entity_idx =
                     archive.push_file_entity(FileEntity::new(data_group, 0xFFFFFF));
-                let mut filepath = file.filepath;
+                let mut filepath = file;
                 filepath.path_and_entity.set_data(new_entity_idx);
                 let new_file_path = archive.insert_file_path(filepath);
-                let new_data = archive.push_file_data(FileData::new_for_unsharing(file.size, 0));
+                let new_data = archive.push_file_data(FileData::new_for_unsharing(size, 0));
                 let new_desc = archive.push_file_desc(FileDescriptor::new(
                     data_group,
                     new_data,
@@ -1376,6 +1456,13 @@ fn observe_load_package(ctx: &InlineCtx) {
         package.path().display(),
         package.flags()
     );
+}
+
+static SAMUSD_BUNSHIN_STRING: &CStr = c"fighter/samusd/model/bunshin/c%02d/model.numdlb";
+
+#[skyline::hook(offset = 0x17e0108, inline)]
+fn set_samusd_bunshin_string(ctx: &mut InlineCtx) {
+    ctx.registers[1].set_x(SAMUSD_BUNSHIN_STRING.as_ptr() as u64);
 }
 
 #[skyline::main(name = "stratus")]
@@ -1437,5 +1524,6 @@ pub fn main() {
         loading_thread_assign_patched_pointer,
         panic_set_invalid_state,
         observe_load_package,
+        set_samusd_bunshin_string
     );
 }

@@ -263,6 +263,14 @@ bitflags::bitflags! {
         const IS_REGIONAL = 1 << 16;
         const IS_SHARED = 1 << 20;
         const IS_UNKNOWN_FLAG = 1 << 21;
+
+        // Stratus exclusive flags, set by file table patching
+        // for customized behavior or further diagnostic information at runtime
+    
+        /// Indicates that a file was retargeted. This means that the file needs to stay shared
+        /// to a file even if that file has a different file name. This allows us to work with
+        /// files that conceptually make sense to stay shared, like Dark Samus's `bunshin` article
+        const IS_RETARGETED = 1 << 29;
         const IS_GROUP_FIXED = 1 << 30;
         const IS_RESHARED = 1 << 31;
     }

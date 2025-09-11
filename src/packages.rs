@@ -2,11 +2,8 @@ use std::ops::Range;
 
 use smash_hash::Hash40;
 
-use crate::{archive::Archive, containers::TableMut, data::{FileGroup, FileInfoFlags, FileLoadMethod, FilePackage, FilePackageChild, FilePackageFlags, FilePath, SearchFolder, SearchPath}, HashDisplay, ReadOnlyFileSystem};
+use crate::{archive::Archive, containers::TableMut, data::{FileGroup, FileInfoFlags, FileLoadMethod, FilePackage, FilePackageChild, FilePackageFlags, FilePath, IntoHash, SearchFolder, SearchPath}, HashDisplay, ReadOnlyFileSystem};
 
-
-const KIRBY_NAME: Hash40 = Hash40::const_new("kirby");
-const KIRBYCOPY_NAME: Hash40 = Hash40::const_new("kirbycopy");
 const SOUNDBANK_FIGHTER: Hash40 = Hash40::const_new("sound/bank/fighter");
 const SOUNDBANK_FIGHTER_VOICE: Hash40 = Hash40::const_new("sound/bank/fighter_voice");
 
@@ -235,10 +232,11 @@ fn duplicate_fighter_costume_child_package(
 
 pub fn duplicate_fighter_costume_package(
     archive: &mut Archive,
+    fighter: Hash40,
     path: Hash40,
     new_costume: Hash40,
 ) -> u32 {
-    let source_package = archive.lookup_file_package(path).unwrap();
+    let source_package = archive.lookup_file_package(path).unwrap_or_else(|| panic!("Failed getting source package {} for {}", path.display(), fighter.display()));
     let source_infos = source_package.infos().range();
     let source_children = source_package.child_packages().range();
     let redirection_index = source_package.data_group().redirection();
@@ -280,4 +278,43 @@ pub fn duplicate_fighter_costume_package(
     duplicate_fighter_costume_file_paths(archive, new_package.info_range(), old_costume, new_costume);
 
     archive.insert_file_package(new_package)
+}
+
+pub fn retarget_files(
+    archive: &mut Archive,
+    package: impl IntoHash,
+    parent: impl IntoHash,
+    new_parent: impl IntoHash,
+) {
+    let package = package.into_hash();
+    let parent = parent.into_hash();
+    let new_parent = new_parent.into_hash();
+    let parent_folder = archive.lookup_search_folder_mut(parent).unwrap();
+
+    let mut child = parent_folder.first_child();
+    while !child.is_end() {
+        let name = child.name();
+        let target_entity = child.archive().lookup_file_path(new_parent.const_with("/").const_with_hash(name)).unwrap().entity().index();
+        let path = child.path();
+        child.archive_mut().lookup_file_path_mut(path).unwrap().set_entity(target_entity);
+        child = child.next();
+    }
+
+    let package = archive.lookup_file_package(package).unwrap();
+    let infos = package.infos().range();
+
+    let parent = parent.const_with("/");
+    for info_idx in infos {
+        let mut info = archive.get_file_info_mut(info_idx).unwrap();
+        if info.path_ref().parent() == parent {
+            let entity = info.path_ref().entity().index();
+            let target_desc = *info.entity_ref().info().desc();
+            info.set_entity(entity);
+            *info.desc_mut() = target_desc;
+            info.desc_mut().set_load_method(FileLoadMethod::Unowned(entity));
+            let flags = info.flags();
+            info.set_flags(flags | FileInfoFlags::IS_SHARED | FileInfoFlags::IS_UNKNOWN_FLAG);
+            assert!(info.flags().intersects(FileInfoFlags::IS_SHARED), "{}", info.path_ref().path().display());
+        }
+    }
 }

@@ -585,6 +585,7 @@ impl HashMemorySlab {
     /// Returns the number of components written into the buffer. If there is not enough space in
     /// the buffer for all of the components then this will write the number of components
     /// available
+    #[allow(dead_code)]
     pub fn buffer_components_for(&self, hash: Hash40, components: &mut [Hash40]) -> Option<usize> {
         // SAFETY: Within this function, we index into slices that we have properly set up in the constructor
         let bucket_idx = hash.crc32() as usize % HASH_BUCKET_COUNT;
@@ -637,85 +638,6 @@ impl HashMemorySlab {
         match bucket.binary_search_by(|a| a.shifted_hash.cmp(&shifted_hash)) {
             Ok(idx) => Some(self.buffer_str_components_for_recursive(start_idx + idx, components)),
             Err(_) => None
-        }
-    }
-
-    pub fn components_for(&self, hash: Hash40) -> Option<ComponentIter<'_>> {
-        ComponentIter::new(self, hash)
-    }
-}
-
-pub struct ComponentIter<'a> {
-    slab: &'a HashMemorySlab,
-    range: SmolRange,
-    current: usize,
-    // Surely we can do this without actually making a box? Maybe a SmallVec for a stack of these?
-    // I really don't want to do allocations but this is a minor perf thing we can address later
-    nested: Option<Box<ComponentIter<'a>>>,
-}
-
-impl<'a> ComponentIter<'a> {
-    fn new(slab: &'a HashMemorySlab, hash: Hash40) -> Option<Self> {
-        // SAFETY: Within this function, we index into slices that we have properly set up in the constructor
-        let bucket_idx = hash.crc32() as usize % HASH_BUCKET_COUNT;
-        let len = unsafe { (*slab.bucket_lengths)[bucket_idx] };
-        let start_idx = bucket_idx * HASH_BUCKET_SIZE;
-        let bucket = unsafe { &(&(*slab.hashes))[start_idx..start_idx + len as usize] };
-
-        let shifted_hash = (hash.raw() >> 8) as u32;
-
-        match bucket.binary_search_by(|a| a.shifted_hash.cmp(&shifted_hash)) {
-            Ok(idx) => Some(Self {
-                slab,
-                range: unsafe { (*slab.hashes)[start_idx + idx].range },
-                current: 0,
-                nested: None,
-            }),
-            Err(_) => None,
-        }
-    }
-}
-
-impl<'a> Iterator for ComponentIter<'a> {
-    type Item = &'a str;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(nested) = self.nested.as_mut() {
-            if let Some(next) = nested.next() {
-                return Some(next);
-            }
-            self.nested = None;
-        }
-
-        if self.current >= self.range.len() as usize {
-            return None;
-        }
-
-        let comp_idx = self.range.start().to_u32() as usize + self.current;
-        self.current += 1;
-        let string_idx = unsafe { (*self.slab.components)[comp_idx].to_u32() };
-        if string_idx & IS_INTERNED_COMPONENT != 0 {
-            let mut nested = ComponentIter {
-                slab: self.slab,
-                range: unsafe {
-                    (*self.slab.hashes)[(string_idx & !IS_INTERNED_COMPONENT) as usize].range
-                },
-                current: 0,
-                nested: None,
-            };
-
-            if let Some(next) = nested.next() {
-                self.nested = Some(Box::new(nested));
-                Some(next)
-            } else {
-                unimplemented!("Interned component with no length?");
-            }
-        } else {
-            let string = unsafe { (*self.slab.strings)[string_idx as usize] };
-            let byte_start = string.start().to_u32() as usize;
-            let bytes =
-                unsafe { &(&*self.slab.bytes)[byte_start..byte_start + string.len() as usize] };
-            Some(unsafe { std::str::from_utf8_unchecked(bytes) })
         }
     }
 }
