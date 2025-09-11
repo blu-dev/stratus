@@ -9,7 +9,7 @@ use crate::{
         FileData, FileDescriptor, FileEntity, FileGroup, FileInfo, FilePackage, FilePackageChild,
         FilePath, IntoHash, SearchFolder, SearchPath, SearchPathLink, StreamData, StreamEntity,
         StreamFolder, StreamPath,
-    },
+    }, HashDisplay,
 };
 
 #[repr(C)]
@@ -258,6 +258,8 @@ impl ResourceTables {
                     unsafe { self.$id.write_and_update(buffer_slice, $id); }
                 )*
 
+                println!("Current: {:#x?}", self.header);
+
                 self.header.resource_data_size = total as u32;
                 self.header.file_package_count = self.file_package.len() as u32;
                 self.header.file_package_child_count = self.file_package_child.len() as u32;
@@ -268,6 +270,7 @@ impl ResourceTables {
                 self.header.file_package_desc_count = self.file_desc.len() as u32 - self.header.versioned_file_desc_count - self.header.file_group_info_count;
                 self.header.file_package_data_count = self.file_data.len()  as u32 - self.header.versioned_file_data_count - self.header.file_group_info_count;
                 unsafe { *new_buffer.cast::<ResourceTableHeader>() = self.header; }
+                println!("New: {:#x?}", self.header);
 
                 self.raw = unsafe { Box::from_raw(buffer_slice) };
             }
@@ -375,7 +378,6 @@ impl ResourceTables {
 }
 
 pub struct Archive {
-    _metadata: ArchiveMetadata,
     resource: ResourceTables,
     search: SearchTables,
 }
@@ -521,6 +523,7 @@ impl Archive {
         TableMut::new(self, |archive| &mut archive.search.search_path, index)
     }
 
+    #[track_caller]
     pub fn insert_search_path(&mut self, path: SearchPath) -> u32 {
         let index = self.search.search_path.push(path);
         let link_index = self
@@ -528,34 +531,37 @@ impl Archive {
             .search_path_link
             .push(SearchPathLink::new(index));
 
-        self.search
+        assert!(self.search
             .search_path_lookup
-            .insert(path.path(), link_index);
+            .insert(path.path(), link_index).is_none(), "{}", path.path().display());
         link_index
     }
 
+    #[track_caller]
     pub fn insert_search_folder(&mut self, folder: SearchFolder) -> u32 {
         let new_index = self.search.search_folder.push(folder);
-        let _ = self
+        assert!(self
             .search
             .search_folder_lookup
-            .insert(folder.path(), new_index);
+            .insert(folder.path(), new_index).is_none(), "{}", folder.path().display());
         new_index
     }
 
+    #[track_caller]
     pub fn insert_file_path(&mut self, path: FilePath) -> u32 {
         let path_idx = self.push_file_path(path);
-        self.resource
+        assert!(self.resource
             .file_path_lookup
-            .insert(path.path_and_entity.hash40(), path_idx);
+            .insert(path.path_and_entity.hash40(), path_idx).is_none(), "{}", path.path().display());
         path_idx
     }
 
+    #[track_caller]
     pub fn insert_file_package(&mut self, package: FilePackage) -> u32 {
         let package_idx = self.push_file_package(package);
-        self.resource
+        assert!(self.resource
             .file_package_lookup
-            .insert(package.path(), package_idx);
+            .insert(package.path(), package_idx).is_none(), "{}", package.path().display());
         package_idx
     }
 
@@ -601,9 +607,23 @@ impl Archive {
         let search = SearchTables::from_bytes(search_slice);
 
         Self {
-            _metadata: metadata,
             resource,
             search,
+        }
+    }
+
+    pub fn resource_blob(&self) -> &[u8] {
+        &self.resource.raw
+    }
+
+    pub fn search_blob(&self) -> &[u8] {
+        &self.search.raw
+    }
+
+    pub unsafe fn from_blobs(packaged: Box<[u8]>, search: Box<[u8]>) -> Self {
+        Self {
+            resource: ResourceTables::from_bytes(packaged),
+            search: SearchTables::from_bytes(search),
         }
     }
 

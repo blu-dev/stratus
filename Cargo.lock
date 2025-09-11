@@ -173,6 +173,7 @@ dependencies = [
  "bitflags",
  "bytemuck",
  "camino",
+ "crc32fast",
  "flate2",
  "log",
  "paste",

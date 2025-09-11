@@ -555,6 +555,91 @@ impl HashMemorySlab {
         meta
     }
 
+    fn buffer_components_for_recursive(&self, index: usize, components: &mut [Hash40]) -> usize {
+        let range = unsafe { (*self.hashes)[index].range };
+        let start = range.start().to_u32() as usize;
+        let mut written = 0;
+        for el in 0..range.len() {
+            if written >= components.len() {
+                return written;
+            }
+            let comp_idx = start + el as usize;
+            let string_idx = unsafe { (*self.components)[comp_idx].to_u32() };
+            if string_idx & IS_INTERNED_COMPONENT != 0 {
+                written += self.buffer_components_for_recursive((string_idx & !IS_INTERNED_COMPONENT) as usize, &mut components[written..]);
+            } else {
+                let string = unsafe { (*self.strings)[string_idx as usize] };
+                let byte_start = string.start().to_u32() as usize;
+                let bytes =
+                    unsafe { &(&(*self.bytes))[byte_start..byte_start + string.len() as usize] };
+                components[written] = Hash40::const_new_bytes(bytes);
+                written += 1;
+            }
+        }
+
+        written
+    }
+
+    /// Writes the components for this hash into the components buffer, if known.
+    ///
+    /// Returns the number of components written into the buffer. If there is not enough space in
+    /// the buffer for all of the components then this will write the number of components
+    /// available
+    pub fn buffer_components_for(&self, hash: Hash40, components: &mut [Hash40]) -> Option<usize> {
+        // SAFETY: Within this function, we index into slices that we have properly set up in the constructor
+        let bucket_idx = hash.crc32() as usize % HASH_BUCKET_COUNT;
+        let len = unsafe { (*self.bucket_lengths)[bucket_idx] };
+        let start_idx = bucket_idx * HASH_BUCKET_SIZE;
+        let bucket = unsafe { &(&*self.hashes)[start_idx..start_idx + len as usize] };
+
+        let shifted_hash = (hash.raw() >> 8) as u32;
+
+        match bucket.binary_search_by(|a| a.shifted_hash.cmp(&shifted_hash)) {
+            Ok(idx) => Some(self.buffer_components_for_recursive(start_idx + idx, components)),
+            Err(_) => None
+        }       
+    }
+
+    fn buffer_str_components_for_recursive<'a>(&'a self, index: usize, components: &mut [&'a str]) -> usize {
+        let range = unsafe { (*self.hashes)[index].range };
+        let start = range.start().to_u32() as usize;
+        let mut written = 0;
+        for el in 0..range.len() {
+            if written >= components.len() {
+                return written;
+            }
+            let comp_idx = start + el as usize;
+            let string_idx = unsafe { (*self.components)[comp_idx].to_u32() };
+            if string_idx & IS_INTERNED_COMPONENT != 0 {
+                written += self.buffer_str_components_for_recursive((string_idx & !IS_INTERNED_COMPONENT) as usize, &mut components[written..]);
+            } else {
+                let string = unsafe { (*self.strings)[string_idx as usize] };
+                let byte_start = string.start().to_u32() as usize;
+                let bytes =
+                    unsafe { &(&(*self.bytes))[byte_start..byte_start + string.len() as usize] };
+                components[written] = unsafe { std::str::from_utf8_unchecked(bytes) };
+                written += 1;
+            }
+        }
+
+        written
+    }
+
+    pub fn buffer_str_components_for<'a>(&'a self, hash: Hash40, components: &mut [&'a str]) -> Option<usize> {
+        // SAFETY: Within this function, we index into slices that we have properly set up in the constructor
+        let bucket_idx = hash.crc32() as usize % HASH_BUCKET_COUNT;
+        let len = unsafe { (*self.bucket_lengths)[bucket_idx] };
+        let start_idx = bucket_idx * HASH_BUCKET_SIZE;
+        let bucket = unsafe { &(&*self.hashes)[start_idx..start_idx + len as usize] };
+
+        let shifted_hash = (hash.raw() >> 8) as u32;
+
+        match bucket.binary_search_by(|a| a.shifted_hash.cmp(&shifted_hash)) {
+            Ok(idx) => Some(self.buffer_str_components_for_recursive(start_idx + idx, components)),
+            Err(_) => None
+        }
+    }
+
     pub fn components_for(&self, hash: Hash40) -> Option<ComponentIter<'_>> {
         ComponentIter::new(self, hash)
     }

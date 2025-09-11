@@ -1,4 +1,4 @@
-use std::fmt::{Debug, Display};
+use std::{fmt::{Debug, Display}, ops::Range};
 
 use bytemuck::{Pod, Zeroable};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -794,6 +794,14 @@ impl FilePackage {
         self.parent.hash40()
     }
 
+    pub fn set_data_group(&mut self, group: u32) {
+        self.path_and_group.set_data(group);
+    }
+
+    pub fn child_package_range(&self) -> Range<u32> {
+        self.child_start..self.child_start + self.child_count
+    }
+
     pub fn set_child_package_range(&mut self, start: u32, count: u32) {
         self.child_start = start;
         self.child_count = count;
@@ -807,6 +815,10 @@ impl FilePackage {
     pub fn has_sym_link(&self) -> bool {
         let flags = FilePackageFlags::HAS_SUB_PACKAGE | FilePackageFlags::IS_SYM_LINK;
         (self.flags & flags) == flags
+    }
+
+    pub fn info_range(&self) -> Range<u32> {
+        self.info_start..self.info_start + self.info_count
     }
 
     pub fn set_info_range(&mut self, start: u32, count: u32) {

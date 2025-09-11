@@ -1,4 +1,4 @@
-use std::{alloc::Layout, io::Read, ptr::NonNull};
+use std::{alloc::Layout, io::{Read, Seek, SeekFrom}, ptr::NonNull};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use smash_hash::{Hash40, Hash40Map};
@@ -40,17 +40,17 @@ fn discover_and_update_recursive(
 
 #[derive(Debug, Copy, Clone)]
 pub enum Regional {
-    ByRegion(Region),
-    ByLanguage(Language),
-    ByLocale(Locale),
+    Region(Region),
+    Language(Language),
+    Locale(Locale),
 }
 
 impl Regional {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::ByRegion(region) => region.as_str(),
-            Self::ByLanguage(language) => language.as_str(),
-            Self::ByLocale(locale) => locale.as_str(),
+            Self::Region(region) => region.as_str(),
+            Self::Language(language) => language.as_str(),
+            Self::Locale(locale) => locale.as_str(),
         }
     }
 }
@@ -70,9 +70,9 @@ impl DiscoveredFiles {
         regional: Option<Regional>,
     ) -> Option<DiscoveredFile> {
         match regional {
-            Some(Regional::ByLocale(locale)) => self.locales[locale as usize].replace(file),
-            Some(Regional::ByLanguage(language)) => self.languages[language as usize].replace(file),
-            Some(Regional::ByRegion(region)) => self.regions[region as usize].replace(file),
+            Some(Regional::Locale(locale)) => self.locales[locale as usize].replace(file),
+            Some(Regional::Language(language)) => self.languages[language as usize].replace(file),
+            Some(Regional::Region(region)) => self.regions[region as usize].replace(file),
             None => self.base_file.replace(file),
         }
     }
@@ -97,8 +97,8 @@ pub struct DiscoveredFile {
 impl DiscoveredFile {
     pub fn compressed_size(&self) -> Option<u32> {
         match &self.file {
-            LoadableFile::ZipFile { wayfinder, .. } => {
-                Some(wayfinder.compressed_size_hint() as u32)
+            LoadableFile::ZipFile { compressed_size, .. } => {
+                Some(*compressed_size)
             }
             _ => None,
         }
@@ -117,6 +117,7 @@ pub struct NewFile {
 pub struct FileSystem {
     roots: Vec<Utf8PathBuf>,
     files: Hash40Map<DiscoveredFiles>,
+    checksum: u32,
     pub new_files: Vec<NewFile>,
 }
 
@@ -138,6 +139,10 @@ impl FileSystem {
         } else {
             None
         }
+    }
+
+    pub fn checksum(&self) -> u32 {
+        self.checksum
     }
 
     pub fn get_file(&self, hash: Hash40, preference: LocalePreferences) -> Option<&DiscoveredFile> {
@@ -210,15 +215,18 @@ impl FileSystem {
     }
 
     fn load_zip_file(
-        zip: &rawzip::ZipArchive<rawzip::FileReader>,
-        wayfinder: rawzip::ZipArchiveEntryWayfinder,
+        path: &Utf8Path,
+        compressed_size: u32,
+        decompressed_size: u32,
+        compressed_start: u32,
+        alignment: usize,
     ) -> NonNull<u8> {
         // SAFETY: Compressed size must be <= u32::MAX, and if it's not then we are going
         // to OOM anyways. Realistically I don't think a user is going to do that so I
         // won't bother doing the unwrap panic check here (and if they do the worst that
         // happens is that their game crashes)
         let buffer_layout = unsafe {
-            std::alloc::Layout::from_size_align(wayfinder.compressed_size_hint() as usize, 0x1)
+            std::alloc::Layout::from_size_align(compressed_size as usize, alignment)
                 .unwrap_unchecked()
         };
         let compressed_buffer = unsafe { std::alloc::alloc(buffer_layout) };
@@ -228,11 +236,17 @@ impl FileSystem {
             unsafe { std::slice::from_raw_parts_mut(compressed_buffer, buffer_layout.size()) };
 
         // TODO: Check if this can be unwrap_unchecked?
-        let file = zip.get_entry(wayfinder).unwrap();
+        let mut file = std::fs::File::open(path).unwrap();
+        file.seek(SeekFrom::Start(compressed_start as u64)).unwrap();
+        // let file = zip.get_entry(wayfinder).unwrap();
 
-        file.reader().read_exact(slice).unwrap();
+        file.read_exact(slice).unwrap();
 
-        unsafe { NonNull::new_unchecked(Self::into_compressed_ptr(compressed_buffer).unwrap()) }
+        if compressed_size == decompressed_size {
+            unsafe { NonNull::new_unchecked(compressed_buffer) }
+        } else {
+            unsafe { NonNull::new_unchecked(Self::into_compressed_ptr(compressed_buffer).unwrap()) }
+        }
     }
 
     /// Loads the file, optionally leaving it compressed.
@@ -268,8 +282,8 @@ impl FileSystem {
 
                 unsafe { NonNull::new_unchecked(buffer_ptr) }
             }
-            LoadableFile::ZipFile { zip, wayfinder } => {
-                let ptr = Self::load_zip_file(zip, *wayfinder);
+            LoadableFile::ZipFile { compressed_size, decompressed_size, compressed_start } => {
+                let ptr = Self::load_zip_file(&self.roots[file.root_idx as usize], *compressed_size, *decompressed_size, *compressed_start, alignment);
                 if leave_compressed {
                     ptr
                 } else {
@@ -293,8 +307,10 @@ impl FileSystem {
 pub enum LoadableFile {
     UncompressedOnDisk,
     ZipFile {
-        zip: &'static rawzip::ZipArchive<rawzip::FileReader>,
-        wayfinder: rawzip::ZipArchiveEntryWayfinder,
+        // zip: &'static rawzip::ZipArchive<rawzip::FileReader>,
+        compressed_size: u32,
+        decompressed_size: u32,
+        compressed_start: u32,
     },
 }
 
@@ -323,15 +339,15 @@ fn detect_regional_and_cache(
                         path
                     )
                 });
-                regional = Some(Regional::ByLocale(locale));
+                regional = Some(Regional::Locale(locale));
             }
             // +xx region/language indicator
             else if file_stem.len() - pos == 3 {
                 let substr = &file_stem[pos + 1..];
                 if let Some(language) = Language::from_str(substr) {
-                    regional = Some(Regional::ByLanguage(language));
+                    regional = Some(Regional::Language(language));
                 } else if let Some(region) = Region::from_str(substr) {
-                    regional = Some(Regional::ByRegion(region));
+                    regional = Some(Regional::Region(region));
                 } else {
                     panic!("Invalid region/language suffix {} in file {}", substr, path);
                 }
@@ -373,9 +389,12 @@ pub fn discover_and_update_hashes(
     let mut file_system = FileSystem {
         roots: vec![],
         files: Hash40Map::default(),
+        checksum: 0,
         new_files: vec![],
     };
     let mut modified_filepath_buffer = String::with_capacity(0x180);
+
+    let mut checksum = crc32fast::Hasher::new();
 
     for folder in mods_root.read_dir_utf8().unwrap() {
         let root = folder.unwrap();
@@ -386,6 +405,7 @@ pub fn discover_and_update_hashes(
 
         let now = std::time::Instant::now();
         if root.file_type().unwrap().is_dir() {
+            checksum.update(root.path().as_str().as_bytes());
             let root_idx: u32 = file_system.roots.len().try_into().unwrap();
             file_system.roots.push(root.path().to_path_buf());
             println!("Discovering in {}", root.path());
@@ -393,6 +413,8 @@ pub fn discover_and_update_hashes(
                 root.path(),
                 root.path(),
                 &mut |file_path: &Utf8Path, len: u32| {
+                    checksum.update(file_path.as_str().as_bytes());
+                    checksum.update(&len.to_le_bytes());
                     println!("\tDiscovered {file_path}");
                     let (intern_result, regional) = detect_regional_and_cache(
                         file_path,
@@ -402,7 +424,7 @@ pub fn discover_and_update_hashes(
                     );
 
                     if intern_result.is_new {
-                        assert!(regional.is_none(), "New files cannot be regional");
+                        assert!(regional.is_none(), "New files cannot be regional: {}", file_path);
                         file_system.new_files.push(NewFile {
                             filepath: FilePath::from_utf8_path(file_path),
                             size: len,
@@ -444,9 +466,6 @@ pub fn discover_and_update_hashes(
             )
             .unwrap();
 
-            let archive: &'static rawzip::ZipArchive<rawzip::FileReader> =
-                Box::leak(Box::new(archive));
-
             file_system.files.reserve(archive.entries_hint() as usize);
 
             let mut entries_iter = archive.entries(&mut buffer);
@@ -457,7 +476,19 @@ pub fn discover_and_update_hashes(
                 let path = Utf8Path::new(unsafe {
                     std::str::from_utf8_unchecked(entry.file_path().as_bytes())
                 });
+
+                if let Some(extension) = path.extension() {
+                    match extension {
+                        "prcxml" => continue,
+                        "xmsbt" => continue,
+                        "prcx" => continue,
+                        _ => {}
+                    }
+                }
+
                 let size = entry.uncompressed_size_hint() as u32;
+                checksum.update(path.as_str().as_bytes());
+                checksum.update(&size.to_le_bytes());
                 let (intern_result, regional) =
                     detect_regional_and_cache(path, hash, cache, &mut modified_filepath_buffer);
 
@@ -475,6 +506,10 @@ pub fn discover_and_update_hashes(
                     path
                 };
 
+                let wayfinder = entry.wayfinder();
+                let file = archive.get_entry(wayfinder).unwrap();
+                let file = LoadableFile::ZipFile { compressed_size: wayfinder.compressed_size_hint() as u32, decompressed_size: wayfinder.uncompressed_size_hint() as u32, compressed_start: file.compressed_data_range().0 as u32 };
+
                 let previous = file_system
                     .files
                     .entry(path.into_hash())
@@ -484,10 +519,7 @@ pub fn discover_and_update_hashes(
                             root_idx,
                             size,
                             regional,
-                            file: LoadableFile::ZipFile {
-                                zip: archive,
-                                wayfinder: entry.wayfinder(),
-                            },
+                            file
                         },
                         regional,
                     );
@@ -510,6 +542,8 @@ pub fn discover_and_update_hashes(
             now.elapsed().as_secs_f32()
         );
     }
+
+    file_system.checksum = checksum.finalize();
 
     file_system
 }
