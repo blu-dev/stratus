@@ -145,3 +145,19 @@ pub fn install_lazy_loading_patches() {
         chara_select_scene_destructor
     );
 }
+
+pub fn install_inkling() {
+    #[skyline::hook(offset = 0x35bb960, inline)]
+    fn set_inkling_color(ctx: &mut InlineCtx) {
+        let x = ctx.registers[24].x() % 8;
+        ctx.registers[24].set_x(x);
+    }
+
+    #[skyline::hook(offset = 0x35baed4, inline)]
+    fn set_inkling_color_2(ctx: &mut InlineCtx) {
+        let x = ctx.registers[20].x() % 8;
+        ctx.registers[20].set_x(x);
+    }
+
+    skyline::install_hooks!(set_inkling_color, set_inkling_color_2);
+}

@@ -31,7 +31,9 @@ mod hash_interner;
 #[allow(static_mut_refs)]
 mod kirby_copy;
 mod logger;
+mod menu;
 mod mount_save;
+mod nvn;
 mod packages;
 
 const SKIP_CACHE: bool = true;
@@ -979,6 +981,15 @@ fn initial_loading(_ctx: &InlineCtx) {
             }
         }
 
+        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c08".into_hash());
+        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c09".into_hash());
+        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c10".into_hash());
+        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c11".into_hash());
+        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c12".into_hash());
+        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c13".into_hash());
+        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c14".into_hash());
+        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c15".into_hash());
+
         for package_idx in 0..archive.num_file_package() {
             let package = archive.get_file_package(package_idx as u32).unwrap();
             let infos = package.infos();
@@ -1465,6 +1476,11 @@ fn set_samusd_bunshin_string(ctx: &mut InlineCtx) {
     ctx.registers[1].set_x(SAMUSD_BUNSHIN_STRING.as_ptr() as u64);
 }
 
+#[skyline::hook(offset = 0xb0b19c, inline)]
+fn set_inkling_max_count(ctx: &mut InlineCtx) {
+    ctx.registers[14].set_x(8);
+}
+
 #[skyline::main(name = "stratus")]
 pub fn main() {
     std::panic::set_hook(Box::new(|info| {
@@ -1486,11 +1502,14 @@ pub fn main() {
         );
     }));
 
+    menu::init_menu();
+    logger::install_hooks();
+
     fixes::install_lazy_loading_patches();
+    fixes::install_inkling();
 
     mount_save::get_locale_from_user_save();
 
-    logger::install_hooks();
 
     unsafe {
         set_overclock_enabled(true);
@@ -1524,6 +1543,7 @@ pub fn main() {
         loading_thread_assign_patched_pointer,
         panic_set_invalid_state,
         observe_load_package,
-        set_samusd_bunshin_string
+        set_samusd_bunshin_string,
+        set_inkling_max_count
     );
 }

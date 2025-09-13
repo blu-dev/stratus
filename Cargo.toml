@@ -11,17 +11,31 @@ crate-type = ["cdylib"]
 
 [dependencies]
 bitflags = { version = "2.9.2", features = ["bytemuck"] }
+bitvec = "1.0.1"
 bytemuck = { version = "1.23.2", features = ["derive"] }
 camino = "1.1.11"
+cosmic-text = "0.14.2"
 crc32fast = "1.5.0"
+envy = { path = "../envy/envy", features = ["unsend"] }
 flate2 = "1.1.2"
+glam = { version = "0.30.5", features = ["bytemuck"] }
+image = { version = "0.24", default-features = false, features = ["png"] }
+indexmap = "2.11.1"
 log = "0.4.27"
+lyon = "1.0.16"
 paste = "1.0.15"
 rawzip = "0.4.1"
 skyline = { git = "https://github.com/ultimate-research/skyline-rs" }
 smash-hash = { git = "https://github.com/blu-dev/smash-hash" }
 stats_alloc = "0.1.10"
 # smash-hash = { path = "../smash-hash/smash-hash" }
+
+[patch.crates-io]
+bincode = { path = "../bincode" }
+bincode_derive = { path = "../bincode/derive" }
+
+# [path."https://github.com/blu-dev/envy"]
+# envy = { path = "../envy/envy" }
 
 [features]
 sanity_checks = []
