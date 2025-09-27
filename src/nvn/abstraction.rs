@@ -1,6 +1,13 @@
-use std::{alloc::Layout, collections::HashMap, ops::{Index, IndexMut}, ptr::NonNull};
+use std::{
+    alloc::Layout,
+    collections::HashMap,
+    ops::{Index, IndexMut},
+    ptr::NonNull,
+    rc::Rc,
+    sync::Arc,
+};
 
-use bytemuck::Pod;
+use bytemuck::{Pod, Zeroable};
 use glam::UVec2;
 
 use crate::nvn::{self, align_up, ShaderData, PAGE_ALIGNMENT};
@@ -13,9 +20,13 @@ pub struct ManagedMemoryPool {
 
 impl ManagedMemoryPool {
     #[track_caller]
-    pub fn new(device: &nvn::Device, flags: nvn::MemoryPoolFlags, size: usize, alignment: impl Into<Option<usize>>) -> Self {
+    pub fn new(
+        device: &nvn::Device,
+        flags: nvn::MemoryPoolFlags,
+        size: usize,
+        alignment: impl Into<Option<usize>>,
+    ) -> Self {
         Self::new_with_staging(device, flags, size, alignment, |_| {})
-        
     }
 
     #[track_caller]
@@ -24,7 +35,7 @@ impl ManagedMemoryPool {
         flags: nvn::MemoryPoolFlags,
         size: usize,
         alignment: impl Into<Option<usize>>,
-        f: impl FnOnce(&mut [u8])
+        f: impl FnOnce(&mut [u8]),
     ) -> Self {
         let mut builder = nvn::MemoryPoolBuilder::zeroed();
         builder.set_defaults();
@@ -43,9 +54,7 @@ impl ManagedMemoryPool {
             panic!("Failed to allocate memory for ManagedMemoryPool");
         }
 
-        let slice = unsafe {
-            std::slice::from_raw_parts_mut(ptr, size)
-        };
+        let slice = unsafe { std::slice::from_raw_parts_mut(ptr, size) };
 
         f(slice);
 
@@ -53,7 +62,12 @@ impl ManagedMemoryPool {
 
         let mut inner = Box::new(nvn::MemoryPool::zeroed());
 
-        assert!(inner.initialize(&builder), "{:#x} {:#x}", layout.size(), layout.align());
+        assert!(
+            inner.initialize(&builder),
+            "{:#x} {:#x}",
+            layout.size(),
+            layout.align()
+        );
 
         Self {
             inner,
@@ -74,13 +88,11 @@ impl ManagedMemoryPool {
 impl Drop for ManagedMemoryPool {
     fn drop(&mut self) {
         self.inner.finalize();
-        unsafe {
-            std::alloc::dealloc(self.raw_ptr.as_ptr(), self.memory_layout)
-        }
+        unsafe { std::alloc::dealloc(self.raw_ptr.as_ptr(), self.memory_layout) }
     }
 }
 
-const SWAPCHAIN_TEXTURE_COUNT: usize = 2;
+const SWAPCHAIN_TEXTURE_COUNT: usize = 3;
 
 pub struct SwapChain {
     texture_memory: ManagedMemoryPool,
@@ -97,7 +109,8 @@ impl SwapChain {
         builder.set_device(device);
         builder.set_flags(0x9); // 0x8 - compressible, 0x1 display
         builder.set_target(nvn::TextureTarget::D2);
-        builder.set_format(nvn::Format::Rgba8Srgb);
+        builder.set_format(nvn::Format::Rgba8);
+        // builder.set_samples(4);
         builder.set_size2_d(1920, 1080);
 
         let size = builder.get_storage_size();
@@ -107,26 +120,35 @@ impl SwapChain {
 
         let offset_0 = 0usize;
         let offset_1 = offset_0 + target_stride;
-        let total_size = offset_1 + target_stride;
+        let offset_2 = offset_1 + target_stride;
+        let total_size = offset_2 + target_stride;
 
         let memory = ManagedMemoryPool::new(
             device,
-            nvn::MemoryPoolFlags::COMPRESSIBLE | nvn::MemoryPoolFlags::GPU_CACHED | nvn::MemoryPoolFlags::CPU_UNCACHED,
+            nvn::MemoryPoolFlags::COMPRESSIBLE
+                | nvn::MemoryPoolFlags::GPU_CACHED
+                | nvn::MemoryPoolFlags::CPU_UNCACHED,
             total_size,
-            align
+            align,
         );
 
-        let mut textures = [Box::new(nvn::Texture::zeroed()), Box::new(nvn::Texture::zeroed())];
+        let mut textures = [
+            Box::new(nvn::Texture::zeroed()),
+            Box::new(nvn::Texture::zeroed()),
+            Box::new(nvn::Texture::zeroed()),
+        ];
         builder.set_storage(memory.get(), offset_0 as isize);
         assert!(textures[0].initialize(&builder));
         builder.set_storage(memory.get(), offset_1 as isize);
         assert!(textures[1].initialize(&builder));
+        builder.set_storage(memory.get(), offset_2 as isize);
+        assert!(textures[2].initialize(&builder));
 
         let mut builder = nvn::WindowBuilder::zeroed();
         builder.set_defaults();
         builder.set_device(device);
         builder.set_native_window(window);
-        let texture_refs = [&*textures[0], &*textures[1]];
+        let texture_refs = [&*textures[0], &*textures[1], &*textures[2]];
         unsafe {
             builder.set_render_textures(&texture_refs);
         }
@@ -148,7 +170,8 @@ impl SwapChain {
 
     pub fn acquire(&mut self) -> usize {
         assert_eq!(
-            self.window.acquire_texture(&mut self.sync, &mut self.current_texture),
+            self.window
+                .acquire_texture(&mut self.sync, &mut self.current_texture),
             0,
             "nvnWindowAcquireTexture failed"
         );
@@ -159,8 +182,8 @@ impl SwapChain {
         self.textures.get(idx).map(|v| &**v)
     }
 
-    pub fn await_texture(&mut self) {
-        self.sync.wait(u64::MAX)
+    pub fn await_texture(&mut self, queue: &mut nvn::Queue) {
+        queue.wait_sync(&mut self.sync);
     }
 
     pub fn present(&mut self, queue: &mut nvn::Queue) {
@@ -195,7 +218,7 @@ impl ManagedCommandBuffer {
             device,
             nvn::MemoryPoolFlags::CPU_UNCACHED | nvn::MemoryPoolFlags::GPU_CACHED,
             command_size,
-            command_alignment
+            command_alignment,
         );
 
         let control_layout = Layout::from_size_align(control_size, control_alignment).unwrap();
@@ -210,13 +233,15 @@ impl ManagedCommandBuffer {
             memory,
             command_size,
             control: unsafe { NonNull::new_unchecked(control) },
-            control_layout
+            control_layout,
         }
     }
 
     pub fn record(&mut self, f: impl FnOnce(&mut nvn::CommandBuffer)) -> nvn::CommandHandle {
-        self.cmdbuf.add_command_memory(self.memory.get(), 0, self.command_size);
-        self.cmdbuf.add_control_memory(self.control.as_ptr(), self.control_layout.size());
+        self.cmdbuf
+            .add_command_memory(self.memory.get(), 0, self.command_size);
+        self.cmdbuf
+            .add_control_memory(self.control.as_ptr(), self.control_layout.size());
         self.cmdbuf.begin_recording();
         f(&mut self.cmdbuf);
         self.cmdbuf.end_recording()
@@ -226,9 +251,7 @@ impl ManagedCommandBuffer {
 impl Drop for ManagedCommandBuffer {
     fn drop(&mut self) {
         self.cmdbuf.finalize();
-        unsafe {
-            std::alloc::dealloc(self.control.as_ptr(), self.control_layout)
-        }
+        unsafe { std::alloc::dealloc(self.control.as_ptr(), self.control_layout) }
     }
 }
 
@@ -245,7 +268,7 @@ impl ManagedProgram {
         vctrl: *const u8,
         vcode: &'static [u8],
         fctrl: *const u8,
-        fcode: &'static [u8]
+        fcode: &'static [u8],
     ) -> Self {
         let alignment = device.get_int(nvn::DeviceInfo::BufferAlignment) as usize;
         let padding = device.get_int(nvn::DeviceInfo::ShaderPadding) as usize;
@@ -256,20 +279,25 @@ impl ManagedProgram {
 
         let memory = ManagedMemoryPool::new_with_staging(
             device,
-            nvn::MemoryPoolFlags::SHADER_CODE | nvn::MemoryPoolFlags::CPU_NO_ACCESS | nvn::MemoryPoolFlags::GPU_CACHED,
+            nvn::MemoryPoolFlags::SHADER_CODE
+                | nvn::MemoryPoolFlags::CPU_NO_ACCESS
+                | nvn::MemoryPoolFlags::GPU_CACHED,
             total_size,
             alignment,
             |buffer| {
                 buffer[v_offset..v_offset + vcode.len()].copy_from_slice(vcode);
                 buffer[f_offset..f_offset + fcode.len()].copy_from_slice(fcode);
-            }
+            },
         );
 
         let mut builder = nvn::BufferBuilder::zeroed();
         builder.set_defaults();
         builder.set_device(device);
 
-        let mut buffers = [Box::new(nvn::Buffer::zeroed()), Box::new(nvn::Buffer::zeroed())];
+        let mut buffers = [
+            Box::new(nvn::Buffer::zeroed()),
+            Box::new(nvn::Buffer::zeroed()),
+        ];
 
         builder.set_storage(memory.get(), v_offset as isize, vcode.len());
         assert!(buffers[0].initialize(&builder));
@@ -279,7 +307,7 @@ impl ManagedProgram {
 
         let mut program = Box::new(nvn::Program::zeroed());
         assert!(program.initialize(device));
-        
+
         let shader_data = Box::new([
             ShaderData {
                 code: buffers[0].get_address(),
@@ -288,7 +316,7 @@ impl ManagedProgram {
             ShaderData {
                 code: buffers[1].get_address(),
                 control: fctrl,
-            }
+            },
         ]);
 
         assert!(program.set_shaders(2, shader_data.as_ptr()));
@@ -347,17 +375,20 @@ pub struct BufferVec<T: Pod> {
     buffer: Box<nvn::Buffer>,
     cpu: Vec<T>,
     prune_cache: Vec<(usize, (ManagedMemoryPool, Box<nvn::Buffer>))>,
-    changed: bool
+    changed: bool,
 }
 
 impl<T: Pod> BufferVec<T> {
-    fn new_buffer_with_size(device: &nvn::Device, size: usize) -> (ManagedMemoryPool, Box<nvn::Buffer>) {
+    fn new_buffer_with_size(
+        device: &nvn::Device,
+        size: usize,
+    ) -> (ManagedMemoryPool, Box<nvn::Buffer>) {
         let size = size.max(1);
         let memory = ManagedMemoryPool::new(
             device,
             nvn::MemoryPoolFlags::CPU_UNCACHED | nvn::MemoryPoolFlags::GPU_CACHED,
             size,
-            std::mem::align_of::<T>()
+            std::mem::align_of::<T>(),
         );
 
         let mut builder = nvn::BufferBuilder::zeroed();
@@ -384,7 +415,7 @@ impl<T: Pod> BufferVec<T> {
             buffer,
             cpu: Vec::with_capacity(capacity),
             prune_cache: vec![],
-            changed: false
+            changed: false,
         }
     }
 
@@ -431,8 +462,7 @@ impl<T: Pod> BufferVec<T> {
         if needed_length > self.memory.total_size() {
             let new_capacity = needed_length.max(self.memory.total_size() * 2);
 
-            let (new_memory, new_buffer) =
-                Self::new_buffer_with_size(device, new_capacity);
+            let (new_memory, new_buffer) = Self::new_buffer_with_size(device, new_capacity);
             // MAGIC NUMBER: 3 is just the number of stage calls needed before we prune this guy
             self.prune_cache.push((
                 3,
@@ -451,7 +481,9 @@ impl<T: Pod> BufferVec<T> {
 
     pub fn address_for_element(&self, index: usize) -> nvn::BufferAddress {
         assert!(index < self.len());
-        nvn::BufferAddress(self.buffer().get_address().0 + (std::mem::size_of::<T>() * index) as u64)
+        nvn::BufferAddress(
+            self.buffer().get_address().0 + (std::mem::size_of::<T>() * index) as u64,
+        )
     }
 
     pub fn buffer(&self) -> &nvn::Buffer {
@@ -459,16 +491,23 @@ impl<T: Pod> BufferVec<T> {
     }
 }
 
-impl<T: Pod> Index<usize> for BufferVec<T> {
-    type Output = T;
+impl<T: Pod + Zeroable, I> Index<I> for BufferVec<T>
+where
+    Vec<T>: Index<I>,
+{
+    type Output = <Vec<T> as Index<I>>::Output;
 
-    fn index(&self, index: usize) -> &Self::Output {
+    fn index(&self, index: I) -> &Self::Output {
         &self.cpu[index]
     }
 }
 
-impl<T: Pod> IndexMut<usize> for BufferVec<T> {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+impl<T: Pod + Zeroable, I> IndexMut<I> for BufferVec<T>
+where
+    Vec<T>: IndexMut<I>,
+{
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
+        self.changed = true;
         &mut self.cpu[index]
     }
 }
@@ -479,18 +518,37 @@ pub struct TextureInfo {
     pub handle: nvn::TextureHandle,
 }
 
-struct ManagedTexture {
-    texture: Box<nvn::Texture>,
-    sampler: Box<nvn::Sampler>,
+struct LoadedTexture {
     memory: ManagedMemoryPool,
+    texture: Box<nvn::Texture>,
+    size: UVec2,
+    texture_id: i32,
+}
+
+impl Drop for LoadedTexture {
+    fn drop(&mut self) {
+        self.texture.finalize();
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct ImageSampler {
+    pub wrap_mode_x: nvn::WrapMode,
+    pub wrap_mode_y: nvn::WrapMode,
+}
+
+struct ManagedTexture {
+    sampler: Box<nvn::Sampler>,
     info: TextureInfo,
 }
 
 pub struct ManagedImages {
+    device: Rc<nvn::Device>,
+    loaded_textures: HashMap<String, LoadedTexture>,
     texture_pool: Box<nvn::TexturePool>,
     sampler_pool: Box<nvn::SamplerPool>,
     descriptor_pool: ManagedMemoryPool,
-    textures: HashMap<String, ManagedTexture>,
+    textures: HashMap<(String, ImageSampler), ManagedTexture>,
 
     texture_current: i32,
     sampler_current: i32,
@@ -499,25 +557,38 @@ pub struct ManagedImages {
 }
 
 impl ManagedImages {
-    pub fn new(device: &nvn::Device, max_images: usize) -> Self {
+    pub fn new(device: Rc<nvn::Device>, max_images: usize) -> Self {
         assert!(max_images > 0);
 
         let tex_desc_size = device.get_int(nvn::DeviceInfo::TextureDescriptorSize) as usize;
         let sam_desc_size = device.get_int(nvn::DeviceInfo::SamplerDescriptorSize) as usize;
-        let reserved_tex_desc = device.get_int(nvn::DeviceInfo::ReservedTextureDescriptors) as usize;
-        let reserved_sam_desc = device.get_int(nvn::DeviceInfo::ReservedSamplerDescriptors) as usize;
+        let reserved_tex_desc =
+            device.get_int(nvn::DeviceInfo::ReservedTextureDescriptors) as usize;
+        let reserved_sam_desc =
+            device.get_int(nvn::DeviceInfo::ReservedSamplerDescriptors) as usize;
 
         let texture_size = tex_desc_size * (reserved_tex_desc + max_images);
         let sampler_size = sam_desc_size * (reserved_sam_desc + max_images);
 
-        let descriptor_pool = ManagedMemoryPool::new(device, nvn::MemoryPoolFlags::CPU_UNCACHED | nvn::MemoryPoolFlags::GPU_CACHED, texture_size + sampler_size, PAGE_ALIGNMENT);
+        let descriptor_pool = ManagedMemoryPool::new(
+            &device,
+            nvn::MemoryPoolFlags::CPU_UNCACHED | nvn::MemoryPoolFlags::GPU_CACHED,
+            texture_size + sampler_size,
+            PAGE_ALIGNMENT,
+        );
         let mut texture_pool = Box::new(nvn::TexturePool::zeroed());
         assert!(texture_pool.initialize(descriptor_pool.get(), 0, reserved_tex_desc + max_images));
 
         let mut sampler_pool = Box::new(nvn::SamplerPool::zeroed());
-        assert!(sampler_pool.initialize(descriptor_pool.get(), texture_size as isize, reserved_sam_desc + max_images));
+        assert!(sampler_pool.initialize(
+            descriptor_pool.get(),
+            texture_size as isize,
+            reserved_sam_desc + max_images
+        ));
 
         Self {
+            device: device.clone(),
+            loaded_textures: HashMap::new(),
             texture_pool,
             sampler_pool,
             descriptor_pool,
@@ -525,32 +596,133 @@ impl ManagedImages {
             texture_current: reserved_tex_desc as i32,
             sampler_current: reserved_sam_desc as i32,
             texture_max: (reserved_tex_desc + max_images) as i32,
-            sampler_max: (reserved_sam_desc + max_images) as i32
+            sampler_max: (reserved_sam_desc + max_images) as i32,
         }
     }
 
-    pub fn get_info(&self, name: &str) -> Option<TextureInfo> {
-        self.textures.get(name).map(|tex| tex.info)
+    pub fn request_texture(&mut self, name: &str, sampler: ImageSampler) -> Option<TextureInfo> {
+        let key = (name.to_string(), sampler);
+        if let Some(info) = self.textures.get(&key) {
+            return Some(info.info);
+        }
+
+        let texture = self.loaded_textures.get(name)?;
+
+        let mut builder = nvn::SamplerBuilder::zeroed();
+        builder.set_defaults();
+        builder.set_device(&self.device);
+        builder.set_wrap_mode(
+            sampler.wrap_mode_x,
+            sampler.wrap_mode_y,
+            nvn::WrapMode::Clamp,
+        );
+        let mut sampler = Box::new(nvn::Sampler::zeroed());
+        assert!(sampler.initialize(&builder));
+
+        self.sampler_pool
+            .register_sampler(self.sampler_current, &sampler);
+        let info = TextureInfo {
+            size: texture.size,
+            handle: self
+                .device
+                .get_texture_handle(texture.texture_id, self.sampler_current),
+        };
+        self.textures.insert(key, ManagedTexture { sampler, info });
+
+        self.sampler_current += 1;
+
+        Some(info)
     }
 
-    pub fn load_texture(&mut self, device: &nvn::Device, name: impl Into<String>, bytes: &[u8]) -> TextureInfo {
+    pub fn get_texture(&self, name: impl AsRef<str>) -> Option<&nvn::Texture> {
+        self.loaded_textures.get(name.as_ref()).map(|s| &*s.texture)
+    }
+
+    pub fn new_multisampled_render_target(&mut self, name: impl AsRef<str>, target_size: glam::UVec2) -> TextureInfo {
+        let name = name.as_ref();
+
+        let mut builder = nvn::TextureBuilder::zeroed();
+        builder.set_defaults();
+        builder.set_device(&self.device);
+        builder.set_target(nvn::TextureTarget::D2);
+        builder.set_format(nvn::Format::Rgba8Srgb);
+        builder.set_size2_d(target_size.x as i32 * 2, target_size.y as i32 * 2);
+
+        let size = builder.get_storage_size();
+        let align = builder.get_storage_alignment();
+
+        let target_stride = align_up(size, align);
+
+        let memory = ManagedMemoryPool::new(
+            &self.device,
+            nvn::MemoryPoolFlags::COMPRESSIBLE
+                | nvn::MemoryPoolFlags::GPU_CACHED
+                | nvn::MemoryPoolFlags::CPU_UNCACHED,
+            target_stride,
+            align,
+        );
+
+        builder.set_storage(memory.get(), 0);
+        let mut multisample_target = Box::new(nvn::Texture::zeroed());
+        assert!(multisample_target.initialize(&builder));
+
+
+        let mut builder = nvn::SamplerBuilder::zeroed();
+        builder.set_defaults();
+        builder.set_device(&self.device);
+        let mut sampler = Box::new(nvn::Sampler::zeroed());
+        assert!(sampler.initialize(&builder));
+
+        self.texture_pool.register_texture(self.texture_current, &multisample_target, None);
+        self.sampler_pool
+            .register_sampler(self.sampler_current, &sampler);
+
+        self.loaded_textures.insert(name.to_string(), LoadedTexture {
+            memory,
+            texture: multisample_target,
+            size: target_size,
+            texture_id: self.texture_current
+        });
+
+        let info = TextureInfo {
+            size: target_size,
+            handle: self
+                .device
+                .get_texture_handle(self.texture_current, self.sampler_current),
+        };
+
+        self.texture_current += 1;
+        self.sampler_current += 1;
+
+        info
+
+    }
+
+    pub fn load_texture(&mut self, device: &nvn::Device, name: impl Into<String>, bytes: &[u8]) {
         assert!(self.sampler_current < self.sampler_max && self.texture_current < self.texture_max);
 
         let name: String = name.into();
 
-        assert!(!self.textures.contains_key(&name));
+        assert!(!self.loaded_textures.contains_key(&name));
 
-        let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png).unwrap().to_rgba8();
+        let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+            .unwrap()
+            .to_rgba8();
 
         let mut builder = nvn::TextureBuilder::zeroed();
         builder.set_defaults();
         builder.set_device(device);
-        builder.set_format(nvn::Format::Rgba8Srgb);
+        builder.set_format(nvn::Format::Rgba8);
         builder.set_size2_d(image.width() as i32, image.height() as i32);
         let size = builder.get_storage_size();
         let align = builder.get_storage_alignment();
 
-        let memory = ManagedMemoryPool::new(device, nvn::MemoryPoolFlags::GPU_CACHED | nvn::MemoryPoolFlags::CPU_UNCACHED, size, align);
+        let memory = ManagedMemoryPool::new(
+            device,
+            nvn::MemoryPoolFlags::GPU_CACHED | nvn::MemoryPoolFlags::CPU_UNCACHED,
+            size,
+            align,
+        );
         builder.set_storage(memory.get(), 0);
         let mut texture = Box::new(nvn::Texture::zeroed());
         assert!(texture.initialize(&builder));
@@ -559,33 +731,18 @@ impl ManagedImages {
         texture.write_texels(None, &region, image.as_raw().as_ptr());
         texture.flush_texels(None, &region);
 
-        let mut builder = nvn::SamplerBuilder::zeroed();
-        builder.set_defaults();
-        builder.set_device(device);
-        let mut sampler = Box::new(nvn::Sampler::zeroed());
-        assert!(sampler.initialize(&builder));
-
-        self.texture_pool.register_texture(self.texture_current, &texture, None);
-        self.sampler_pool.register_sampler(self.sampler_current, &sampler);
-
-        let handle = device.get_texture_handle(self.texture_current, self.sampler_current);
-
-        let info = TextureInfo {
-            size: image.dimensions().into(),
-            handle
-        };
-
-        let _ = self.textures.insert(name, ManagedTexture {
-            texture,
-            sampler,
-            memory,
-            info,
-        });
-
-        self.sampler_current += 1;
+        self.texture_pool
+            .register_texture(self.texture_current, &texture, None);
+        self.loaded_textures.insert(
+            name,
+            LoadedTexture {
+                texture,
+                memory,
+                size: image.dimensions().into(),
+                texture_id: self.texture_current,
+            },
+        );
         self.texture_current += 1;
-
-        info
     }
 
     pub fn texpool(&self) -> &nvn::TexturePool {
@@ -596,4 +753,3 @@ impl ManagedImages {
         &self.sampler_pool
     }
 }
-

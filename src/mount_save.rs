@@ -95,7 +95,8 @@ pub fn get_locale_from_user_save() -> LocalePreferences {
 
         let mut language_code = None;
         if let Ok(mut file) = std::fs::File::open("save:/save_data/system_data.bin") {
-            file.seek(std::io::SeekFrom::Start(SAVE_REGION_OFFSET as u64)).unwrap();
+            file.seek(std::io::SeekFrom::Start(SAVE_REGION_OFFSET as u64))
+                .unwrap();
             let mut code = [0u8];
             file.read_exact(&mut code).unwrap();
             language_code = Some(code[0]);
@@ -108,7 +109,9 @@ pub fn get_locale_from_user_save() -> LocalePreferences {
         nn::account::Finalize();
 
         let desired = get_desired_language();
-        let language = language_code.and_then(Language::from_u8).unwrap_or(Language::English);
+        let language = language_code
+            .and_then(Language::from_u8)
+            .unwrap_or(Language::English);
 
         let region = match desired {
             0 => 0,
@@ -116,7 +119,7 @@ pub fn get_locale_from_user_save() -> LocalePreferences {
             4..11 => 2,
             11..14 => 3,
             14 => 4,
-            _ => 1
+            _ => 1,
         };
 
         let (locale, region) = match (language, region) {
@@ -133,7 +136,7 @@ pub fn get_locale_from_user_save() -> LocalePreferences {
             (Language::Russian, _) => (Locale::Russian, Region::Europe),
             (Language::Chinese, _) => (Locale::Chinese, Region::China),
             (Language::Taiwanese, _) => (Locale::Taiwanese, Region::China),
-            (Language::Korean, _) => (Locale::Korean, Region::China)
+            (Language::Korean, _) => (Locale::Korean, Region::China),
         };
 
         LocalePreferences {

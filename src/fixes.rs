@@ -32,7 +32,11 @@ pub fn install_lazy_loading_patches() {
       it needs to load
     */
     #[from_offset(0x3237820)]
-    pub fn get_ui_chara_path_from_hash_color_and_type(ui_chara_hash: u64, color_slot: u32, ui_type: u32) -> u64;
+    pub fn get_ui_chara_path_from_hash_color_and_type(
+        ui_chara_hash: u64,
+        color_slot: u32,
+        ui_type: u32,
+    ) -> u64;
 
     // This takes the character_database and the ui_chara_hash to get the color_num
     #[from_offset(0x32384c0)]
@@ -71,9 +75,12 @@ pub fn install_lazy_loading_patches() {
         if PARAM_1 != 0 && PARAM_4 != 0 {
             // Get the color_num for smooth loading between different CSPs
             // Get the character database for the color num function
-            let parameters_cache = (skyline::hooks::getRegionAddress(skyline::hooks::Region::Text) as *const u8).add(0x532d730);
+            let parameters_cache = (skyline::hooks::getRegionAddress(skyline::hooks::Region::Text)
+                as *const u8)
+                .add(0x532d730);
             let max_color: u32 = get_color_num_from_hash(
-                (*(*(parameters_cache as *const u64) as *const ParametersCache)).get_chara_db() as u64,
+                (*(*(parameters_cache as *const u64) as *const ParametersCache)).get_chara_db()
+                    as u64,
                 ui_chara_hash,
             ) as u32;
 
@@ -105,16 +112,27 @@ pub fn install_lazy_loading_patches() {
             };
 
             // Load both next and previous color paths
-            let next_color_path = get_ui_chara_path_from_hash_color_and_type(ui_chara_hash, next_color, 1);
+            let next_color_path =
+                get_ui_chara_path_from_hash_color_and_type(ui_chara_hash, next_color, 1);
             load_ui_file(PARAM_1 as *const u64, &next_color_path, 0, PARAM_4);
-            let prev_color_path = get_ui_chara_path_from_hash_color_and_type(ui_chara_hash, prev_color, 1);
+            let prev_color_path =
+                get_ui_chara_path_from_hash_color_and_type(ui_chara_hash, prev_color, 1);
             load_ui_file(PARAM_1 as *const u64, &prev_color_path, 0, PARAM_4);
         }
     }
 
     #[hook(offset = 0x19fc790)]
-    pub unsafe fn css_set_selected_character_ui(param_1: *const u64, chara_hash_1: u64, chara_hash_2: u64, color: u32, unk1: u32, unk2: u32) {
-        let parameters_cache = (skyline::hooks::getRegionAddress(skyline::hooks::Region::Text) as *const u8).add(0x532d730);
+    pub unsafe fn css_set_selected_character_ui(
+        param_1: *const u64,
+        chara_hash_1: u64,
+        chara_hash_2: u64,
+        color: u32,
+        unk1: u32,
+        unk2: u32,
+    ) {
+        let parameters_cache = (skyline::hooks::getRegionAddress(skyline::hooks::Region::Text)
+            as *const u8)
+            .add(0x532d730);
         let echo = get_ui_chara_echo(
             (*(*(parameters_cache as *const u64) as *const ParametersCache)).get_chara_db() as u64,
             chara_hash_1,

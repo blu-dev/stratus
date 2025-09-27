@@ -1,11 +1,21 @@
-use std::{alloc::Layout, hint::unreachable_unchecked, io::{Read, Seek, SeekFrom}, ptr::NonNull};
+use std::{
+    alloc::Layout,
+    hint::unreachable_unchecked,
+    io::{Read, Seek, SeekFrom},
+    ptr::NonNull,
+};
 
 use bytemuck::{Pod, Zeroable};
 use camino::{Utf8Path, Utf8PathBuf};
 use rawzip::RECOMMENDED_BUFFER_SIZE;
 use smash_hash::{Hash40, Hash40Map};
 
-use crate::{data::{IntoHash, Locale, Region}, hash_interner::{HashMemorySlab, InternPathResult, InternerCache}, mount_save::Language, HashDisplay, LocalePreferences};
+use crate::{
+    data::{IntoHash, Locale, Region},
+    hash_interner::{HashMemorySlab, InternPathResult, InternerCache},
+    mount_save::Language,
+    HashDisplay, LocalePreferences,
+};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Pod, Zeroable)]
@@ -58,9 +68,7 @@ impl FileIndex {
             0b01 => Regionalized::Locale(idx_bits),
             0b10 => Regionalized::Language(idx_bits),
             0b11 => Regionalized::Region(idx_bits),
-            _ => unsafe {
-                unreachable_unchecked()
-            }
+            _ => unsafe { unreachable_unchecked() },
         }
     }
 
@@ -77,14 +85,14 @@ impl FileIndex {
             Regionalized::None => (0, 0),
             Regionalized::Locale(idx) => (1, idx),
             Regionalized::Language(idx) => (2, idx),
-            Regionalized::Region(idx) => (3, idx)
+            Regionalized::Region(idx) => (3, idx),
         };
 
         Self(
             (((ty as u32) & 0x3) << 30)
                 | (((idx as u32) & 0x3F) << 24)
                 | (((compressed as u32) & 0x1) << 23)
-                | (index & Self::INDEX)
+                | (index & Self::INDEX),
         )
     }
 }
@@ -115,8 +123,8 @@ struct CompressedFile {
 struct HashedFile([u32; 2]);
 
 impl HashedFile {
-    const HASH_BITS:      u64 = 0xFF_FFFFFFFF;
-    const INDEX_BITS:     u64 = 0xFFFFFF << 40;
+    const HASH_BITS: u64 = 0xFF_FFFFFFFF;
+    const INDEX_BITS: u64 = 0xFFFFFF << 40;
 
     const fn raw(&self) -> u64 {
         (self.0[0] as u64) | ((self.0[1] as u64) << 32)
@@ -124,13 +132,16 @@ impl HashedFile {
 
     pub const fn new(path: Hash40, index: u32) -> Self {
         let raw = path.raw() | ((index as u64) << 40);
-        Self([(raw & 0xFFFFFFFF) as u32, ((raw & 0xFFFFFFFF_00000000) >> 32) as u32])
+        Self([
+            (raw & 0xFFFFFFFF) as u32,
+            ((raw & 0xFFFFFFFF_00000000) >> 32) as u32,
+        ])
     }
 
     pub const fn path(&self) -> Hash40 {
         Hash40::from_raw(self.raw() & Self::HASH_BITS)
     }
-    
+
     pub const fn index(&self) -> u32 {
         ((self.raw() & Self::INDEX_BITS) >> 40) as u32
     }
@@ -158,12 +169,16 @@ impl FileSystem {
     }
 
     #[allow(dead_code)]
-    pub fn iter_file_paths(&self, preferences: LocalePreferences) -> impl Iterator<Item = Hash40> + '_ {
+    pub fn iter_file_paths(
+        &self,
+        preferences: LocalePreferences,
+    ) -> impl Iterator<Item = Hash40> + '_ {
         unsafe {
             (*self.lookup)
                 .iter()
                 .filter(move |hashed_file| {
-                    self.get_file_by_header(hashed_file.index(), preferences).is_some()
+                    self.get_file_by_header(hashed_file.index(), preferences)
+                        .is_some()
                 })
                 .map(|hashed_file| hashed_file.path())
         }
@@ -174,41 +189,61 @@ impl FileSystem {
         preferences: LocalePreferences,
     ) -> impl Iterator<Item = (Hash40, u32)> + 'a {
         unsafe {
-            (*self.lookup)
-                .iter()
-                .filter_map(move |hashed_file| {
-                    self.get_file_by_header(hashed_file.index(), preferences).map(|file| {
+            (*self.lookup).iter().filter_map(move |hashed_file| {
+                self.get_file_by_header(hashed_file.index(), preferences)
+                    .map(|file| {
                         let size = if file.index.is_compressed() {
                             (*self.compressed)[file.index.index() as usize].decompressed_size
                         } else {
-                            (*self.uncompressed)[file.index.index() as usize].size 
+                            (*self.uncompressed)[file.index.index() as usize].size
                         };
 
                         (hashed_file.path(), size)
                     })
-                })
+            })
         }
     }
 
     pub fn from_bytes(bytes: Box<[u8]>) -> Self {
-        let header: DiscoveredFilesystemHeader = *bytemuck::from_bytes(&bytes[..std::mem::size_of::<DiscoveredFilesystemHeader>()]);
+        let header: DiscoveredFilesystemHeader =
+            *bytemuck::from_bytes(&bytes[..std::mem::size_of::<DiscoveredFilesystemHeader>()]);
         let mut cursor = std::mem::size_of::<DiscoveredFilesystemHeader>();
-        let lookup: *const [HashedFile] = bytemuck::cast_slice(&bytes[cursor..cursor + header.paths as usize * std::mem::size_of::<HashedFile>()]);
+        let lookup: *const [HashedFile] = bytemuck::cast_slice(
+            &bytes[cursor..cursor + header.paths as usize * std::mem::size_of::<HashedFile>()],
+        );
         cursor += header.paths as usize * std::mem::size_of::<HashedFile>();
 
-        let file_headers: *const [FileHeader] = bytemuck::cast_slice(&bytes[cursor..cursor + header.paths as usize * std::mem::size_of::<FileHeader>()]);
+        let file_headers: *const [FileHeader] = bytemuck::cast_slice(
+            &bytes[cursor..cursor + header.paths as usize * std::mem::size_of::<FileHeader>()],
+        );
         cursor += header.paths as usize * std::mem::size_of::<FileHeader>();
 
-        let files: *const [File] = bytemuck::cast_slice(&bytes[cursor..cursor + (header.uncompressed_files + header.compressed_files) as usize * std::mem::size_of::<File>()]);
-        cursor += (header.uncompressed_files + header.compressed_files) as usize * std::mem::size_of::<File>();
+        let files: *const [File] = bytemuck::cast_slice(
+            &bytes[cursor
+                ..cursor
+                    + (header.uncompressed_files + header.compressed_files) as usize
+                        * std::mem::size_of::<File>()],
+        );
+        cursor += (header.uncompressed_files + header.compressed_files) as usize
+            * std::mem::size_of::<File>();
 
-        let uncompressed: *const [UncompressedFile] = bytemuck::cast_slice(&bytes[cursor..cursor + header.uncompressed_files as usize * std::mem::size_of::<UncompressedFile>()]);
+        let uncompressed: *const [UncompressedFile] = bytemuck::cast_slice(
+            &bytes[cursor
+                ..cursor
+                    + header.uncompressed_files as usize * std::mem::size_of::<UncompressedFile>()],
+        );
         cursor += header.uncompressed_files as usize * std::mem::size_of::<UncompressedFile>();
 
-        let compressed: *const [CompressedFile] = bytemuck::cast_slice(&bytes[cursor..cursor + header.compressed_files as usize * std::mem::size_of::<CompressedFile>()]);
+        let compressed: *const [CompressedFile] = bytemuck::cast_slice(
+            &bytes[cursor
+                ..cursor
+                    + header.compressed_files as usize * std::mem::size_of::<CompressedFile>()],
+        );
         cursor += header.compressed_files as usize * std::mem::size_of::<CompressedFile>();
 
-        let roots: *const [Root] = bytemuck::cast_slice(&bytes[cursor..cursor + header.roots as usize * std::mem::size_of::<Root>()]);
+        let roots: *const [Root] = bytemuck::cast_slice(
+            &bytes[cursor..cursor + header.roots as usize * std::mem::size_of::<Root>()],
+        );
         cursor += header.roots as usize * std::mem::size_of::<Root>();
 
         let root_bytes = &raw const bytes[cursor..cursor + header.root_byte_len as usize];
@@ -224,25 +259,23 @@ impl FileSystem {
             files,
             lookup,
             uncompressed,
-            compressed
+            compressed,
         }
     }
 
     pub fn get_decompressed_size(&self, file: &File) -> u32 {
         if file.index.is_compressed() {
-            unsafe {
-                (*self.compressed)[file.index.index() as usize].decompressed_size
-            }
+            unsafe { (*self.compressed)[file.index.index() as usize].decompressed_size }
         } else {
-            unsafe {
-                (*self.uncompressed)[file.index.index() as usize].size
-            }
+            unsafe { (*self.uncompressed)[file.index.index() as usize].size }
         }
     }
 
     fn get_file_by_header(&self, header_idx: u32, preferences: LocalePreferences) -> Option<&File> {
         let header = unsafe { (*self.file_headers)[header_idx as usize] };
-        let files = unsafe { &(&*self.files)[header.start as usize..(header.start + header.num_files) as usize] };
+        let files = unsafe {
+            &(&*self.files)[header.start as usize..(header.start + header.num_files) as usize]
+        };
 
         let mut locale_match = None;
         let mut language_match = None;
@@ -252,23 +285,30 @@ impl FileSystem {
         for file in files {
             match file.index.get_regionalized() {
                 Regionalized::None => base_match = Some(file),
-                Regionalized::Locale(idx) if preferences.locale as u8 == idx => locale_match = Some(file),
-                Regionalized::Language(idx) if preferences.language as u8 == idx => language_match = Some(file), 
-                Regionalized::Region(idx) if preferences.region as u8 == idx => region_match = Some(file),
+                Regionalized::Locale(idx) if preferences.locale as u8 == idx => {
+                    locale_match = Some(file)
+                }
+                Regionalized::Language(idx) if preferences.language as u8 == idx => {
+                    language_match = Some(file)
+                }
+                Regionalized::Region(idx) if preferences.region as u8 == idx => {
+                    region_match = Some(file)
+                }
                 _ => {}
             }
         }
 
-        locale_match.or(language_match).or(region_match).or(base_match)
+        locale_match
+            .or(language_match)
+            .or(region_match)
+            .or(base_match)
     }
 
-    pub fn lookup_file(
-        &self, 
-        hash: Hash40,
-        preferences: LocalePreferences,
-    ) -> Option<&File> {
+    pub fn lookup_file(&self, hash: Hash40, preferences: LocalePreferences) -> Option<&File> {
         let file_header_index = unsafe {
-            let index = (&*self.lookup).binary_search_by_key(&hash, |file| file.path()).ok()?;
+            let index = (&*self.lookup)
+                .binary_search_by_key(&hash, |file| file.path())
+                .ok()?;
             (*self.lookup)[index].index()
         };
 
@@ -278,7 +318,10 @@ impl FileSystem {
     fn get_root(&self, root_idx: u32) -> &str {
         let root = unsafe { (&*self.roots)[root_idx as usize] };
         unsafe {
-            std::str::from_utf8_unchecked(&(&*self.root_bytes)[root.byte_start as usize..(root.byte_start + root.byte_count) as usize])
+            std::str::from_utf8_unchecked(
+                &(&*self.root_bytes)
+                    [root.byte_start as usize..(root.byte_start + root.byte_count) as usize],
+            )
         }
     }
 
@@ -301,7 +344,12 @@ impl FileSystem {
         }
     }
 
-    pub fn decompress_file(&self, file: &File, pointer: NonNull<u8>, alignment: usize) -> NonNull<u8> {
+    pub fn decompress_file(
+        &self,
+        file: &File,
+        pointer: NonNull<u8>,
+        alignment: usize,
+    ) -> NonNull<u8> {
         // Check if the uppermost bit is set in the pointer, if it is then we it's compressed and
         // we need to decompress it. This should also cause a memory access violation and crash if
         // we fail to decompress it before providing it to the game.
@@ -309,11 +357,15 @@ impl FileSystem {
             // TODO: Move this out of unwrap
             let compressed_file = unsafe { (*self.compressed)[file.index.index() as usize] };
 
-            let compressed_buffer =
-                unsafe { std::slice::from_raw_parts(real_ptr, compressed_file.compressed_size as usize) };
+            let compressed_buffer = unsafe {
+                std::slice::from_raw_parts(real_ptr, compressed_file.compressed_size as usize)
+            };
 
-            let decompressed_buffer_layout =
-                std::alloc::Layout::from_size_align(compressed_file.decompressed_size as usize, alignment).unwrap();
+            let decompressed_buffer_layout = std::alloc::Layout::from_size_align(
+                compressed_file.decompressed_size as usize,
+                alignment,
+            )
+            .unwrap();
 
             let decompressed_ptr = unsafe { std::alloc::alloc(decompressed_buffer_layout) };
 
@@ -329,7 +381,10 @@ impl FileSystem {
             unsafe {
                 std::alloc::dealloc(
                     real_ptr,
-                    std::alloc::Layout::from_size_align_unchecked(compressed_file.compressed_size as usize, alignment),
+                    std::alloc::Layout::from_size_align_unchecked(
+                        compressed_file.compressed_size as usize,
+                        alignment,
+                    ),
                 );
             }
 
@@ -339,12 +394,7 @@ impl FileSystem {
         }
     }
 
-    fn read_zip_file(
-        &self,
-        root: u32,
-        file: &CompressedFile,
-        alignment: usize
-    ) -> NonNull<u8> {
+    fn read_zip_file(&self, root: u32, file: &CompressedFile, alignment: usize) -> NonNull<u8> {
         // SAFETY: Compressed size must be <= u32::MAX, and if it's not then we are going
         // to OOM anyways. Realistically I don't think a user is going to do that so I
         // won't bother doing the unwrap panic check here (and if they do the worst that
@@ -363,7 +413,9 @@ impl FileSystem {
 
         // TODO: Check if this can be unwrap_unchecked?
         let mut zip_file = std::fs::File::open(root).unwrap();
-        zip_file.seek(SeekFrom::Start(file.compressed_start as u64)).unwrap();
+        zip_file
+            .seek(SeekFrom::Start(file.compressed_start as u64))
+            .unwrap();
         // let file = zip.get_entry(wayfinder).unwrap();
 
         zip_file.read_exact(slice).unwrap();
@@ -373,10 +425,16 @@ impl FileSystem {
         } else {
             unsafe { NonNull::new_unchecked(Self::into_compressed_ptr(compressed_buffer).unwrap()) }
         }
-
     }
 
-    pub fn read_file(&self, hash: Hash40, file: &File, filepath_buffer: &mut String, leave_compressed: bool, alignment: usize) -> NonNull<u8> {
+    pub fn read_file(
+        &self,
+        hash: Hash40,
+        file: &File,
+        filepath_buffer: &mut String,
+        leave_compressed: bool,
+        alignment: usize,
+    ) -> NonNull<u8> {
         use std::fmt::Write;
         let root = self.get_root(file.root);
 
@@ -394,7 +452,13 @@ impl FileSystem {
             let uncompressed_file = unsafe { (*self.uncompressed)[file.index.index() as usize] };
 
             let buffer = unsafe {
-                std::slice::from_raw_parts_mut(std::alloc::alloc(Layout::from_size_align(uncompressed_file.size as usize, alignment).unwrap()), uncompressed_file.size as usize)
+                std::slice::from_raw_parts_mut(
+                    std::alloc::alloc(
+                        Layout::from_size_align(uncompressed_file.size as usize, alignment)
+                            .unwrap(),
+                    ),
+                    uncompressed_file.size as usize,
+                )
             };
 
             let mut file = std::fs::File::open(&filepath_buffer).unwrap();
@@ -412,7 +476,7 @@ enum FileKind {
         start: u32,
         compressed_size: u32,
         decompressed_size: u32,
-    }
+    },
 }
 
 struct DiscoveredFile {
@@ -434,27 +498,21 @@ impl DiscoveredFiles {
         self.by_locale
             .iter()
             .filter_map(|item| item.as_ref())
-            .chain(
-                self.by_language
-                    .iter()
-                    .filter_map(|item| item.as_ref())
-            )
-            .chain(
-                self.by_region
-                    .iter()
-                    .filter_map(|item| item.as_ref())
-            )
-            .chain(
-                self.base.iter()
-            )
+            .chain(self.by_language.iter().filter_map(|item| item.as_ref()))
+            .chain(self.by_region.iter().filter_map(|item| item.as_ref()))
+            .chain(self.base.iter())
     }
 
-    fn set_by_regionalized(&mut self, file: DiscoveredFile, regionalized: Regionalized) -> Option<DiscoveredFile> {
+    fn set_by_regionalized(
+        &mut self,
+        file: DiscoveredFile,
+        regionalized: Regionalized,
+    ) -> Option<DiscoveredFile> {
         match regionalized {
             Regionalized::None => self.base.replace(file),
             Regionalized::Locale(idx) => self.by_locale[idx as usize].replace(file),
             Regionalized::Language(idx) => self.by_language[idx as usize].replace(file),
-            Regionalized::Region(idx) => self.by_region[idx as usize].replace(file)
+            Regionalized::Region(idx) => self.by_region[idx as usize].replace(file),
         }
     }
 }
@@ -530,7 +588,11 @@ fn detect_regional_and_cache(
 
 impl Discovery {
     pub fn as_slab(&self) -> Box<[u8]> {
-        let root_byte_len = self.roots.iter().map(|root| root.as_str().len()).sum::<usize>();
+        let root_byte_len = self
+            .roots
+            .iter()
+            .map(|root| root.as_str().len())
+            .sum::<usize>();
         let total_memory_size = std::mem::size_of::<DiscoveredFilesystemHeader>()
             + std::mem::size_of::<HashedFile>() * self.files.len()
             + std::mem::size_of::<FileHeader>() * self.files.len()
@@ -543,7 +605,7 @@ impl Discovery {
         let slab = unsafe {
             std::slice::from_raw_parts_mut(
                 std::alloc::alloc(Layout::from_size_align(total_memory_size, 0x10).unwrap()),
-                total_memory_size
+                total_memory_size,
             )
         };
 
@@ -553,22 +615,33 @@ impl Discovery {
             roots: self.roots.len() as u32,
             paths: self.files.len() as u32,
             uncompressed_files: self.uncompressed_files as u32,
-            compressed_files: self.compressed_files as u32
+            compressed_files: self.compressed_files as u32,
         };
 
-        let (header_bytes, remainder) = slab.split_at_mut(std::mem::size_of::<DiscoveredFilesystemHeader>());
-        let (hashes, remainder) = remainder.split_at_mut(std::mem::size_of::<HashedFile>() * header.paths as usize);
-        let (file_headers, remainder) = remainder.split_at_mut(std::mem::size_of::<FileHeader>() * header.paths as usize);
-        let (files, remainder) = remainder.split_at_mut(std::mem::size_of::<File>() * (header.compressed_files + header.uncompressed_files) as usize);
-        let (uncompressed_files, remainder) = remainder.split_at_mut(std::mem::size_of::<UncompressedFile>() * header.uncompressed_files as usize);
-        let (compressed_files, remainder) = remainder.split_at_mut(std::mem::size_of::<CompressedFile>() * header.compressed_files as usize);
-        let (roots, root_bytes) = remainder.split_at_mut(std::mem::size_of::<Root>() * header.roots as usize);
+        let (header_bytes, remainder) =
+            slab.split_at_mut(std::mem::size_of::<DiscoveredFilesystemHeader>());
+        let (hashes, remainder) =
+            remainder.split_at_mut(std::mem::size_of::<HashedFile>() * header.paths as usize);
+        let (file_headers, remainder) =
+            remainder.split_at_mut(std::mem::size_of::<FileHeader>() * header.paths as usize);
+        let (files, remainder) = remainder.split_at_mut(
+            std::mem::size_of::<File>()
+                * (header.compressed_files + header.uncompressed_files) as usize,
+        );
+        let (uncompressed_files, remainder) = remainder.split_at_mut(
+            std::mem::size_of::<UncompressedFile>() * header.uncompressed_files as usize,
+        );
+        let (compressed_files, remainder) = remainder
+            .split_at_mut(std::mem::size_of::<CompressedFile>() * header.compressed_files as usize);
+        let (roots, root_bytes) =
+            remainder.split_at_mut(std::mem::size_of::<Root>() * header.roots as usize);
         assert_eq!(root_bytes.len(), header.root_byte_len as usize);
 
         let hashes: &mut [HashedFile] = bytemuck::cast_slice_mut(hashes);
         let file_headers: &mut [FileHeader] = bytemuck::cast_slice_mut(file_headers);
         let files: &mut [File] = bytemuck::cast_slice_mut(files);
-        let uncompressed_files: &mut [UncompressedFile] = bytemuck::cast_slice_mut(uncompressed_files);
+        let uncompressed_files: &mut [UncompressedFile] =
+            bytemuck::cast_slice_mut(uncompressed_files);
         let compressed_files: &mut [CompressedFile] = bytemuck::cast_slice_mut(compressed_files);
         let roots: &mut [Root] = bytemuck::cast_slice_mut(roots);
 
@@ -586,27 +659,33 @@ impl Discovery {
             for file in file.iter_priority_ordered() {
                 num_files += 1;
                 let index = match file.kind {
-                    FileKind::Compressed { start, compressed_size, decompressed_size } => {
+                    FileKind::Compressed {
+                        start,
+                        compressed_size,
+                        decompressed_size,
+                    } => {
                         compressed_files[compressed_cursor] = CompressedFile {
                             compressed_start: start,
                             compressed_size,
-                            decompressed_size
+                            decompressed_size,
                         };
                         compressed_cursor += 1;
                         FileIndex::from_parts(file.regionalized, true, compressed_cursor as u32 - 1)
-                    },
+                    }
                     FileKind::Uncompressed { size } => {
-                        uncompressed_files[uncompressed_cursor] = UncompressedFile {
-                            size
-                        };
+                        uncompressed_files[uncompressed_cursor] = UncompressedFile { size };
                         uncompressed_cursor += 1;
-                        FileIndex::from_parts(file.regionalized, false, uncompressed_cursor as u32 - 1)
+                        FileIndex::from_parts(
+                            file.regionalized,
+                            false,
+                            uncompressed_cursor as u32 - 1,
+                        )
                     }
                 };
 
                 files[file_cursor] = File {
                     root: file.root_index,
-                    index
+                    index,
                 };
 
                 file_cursor += 1;
@@ -626,7 +705,7 @@ impl Discovery {
             let bytes = root.as_str().as_bytes();
             roots[idx] = Root {
                 byte_start: root_byte_cursor as u32,
-                byte_count: bytes.len() as u32
+                byte_count: bytes.len() as u32,
             };
             root_bytes[root_byte_cursor..root_byte_cursor + bytes.len()].copy_from_slice(bytes);
 
@@ -662,7 +741,11 @@ impl Discovery {
         }
     }
 
-    pub fn new_in_root(root: &Utf8Path, hashes: &mut HashMemorySlab, cache: &mut InternerCache) -> Self {
+    pub fn new_in_root(
+        root: &Utf8Path,
+        hashes: &mut HashMemorySlab,
+        cache: &mut InternerCache,
+    ) -> Self {
         let mut zip_buffer = vec![0u8; RECOMMENDED_BUFFER_SIZE];
         let mut filepath_buffer = String::with_capacity(0x180);
 
@@ -723,7 +806,11 @@ impl Discovery {
             } else if ft.is_file() && entry.file_name().ends_with(".zip") {
                 checksum.update(path.as_str().as_bytes());
                 roots.push(path.to_path_buf());
-                let zip = rawzip::ZipArchive::from_file(std::fs::File::open(path).unwrap(), &mut zip_buffer).unwrap();
+                let zip = rawzip::ZipArchive::from_file(
+                    std::fs::File::open(path).unwrap(),
+                    &mut zip_buffer,
+                )
+                .unwrap();
 
                 let mut entries = zip.entries(&mut zip_buffer);
                 while let Some(next) = entries.next_entry().unwrap() {
@@ -738,7 +825,13 @@ impl Discovery {
                     checksum.update(&(wayfinder.uncompressed_size_hint() as u32).to_le_bytes());
                     let file = zip.get_entry(wayfinder).unwrap();
 
-                    let regional = detect_regional_and_cache(Utf8Path::new(fp), hashes, cache, &mut filepath_buffer).1;
+                    let regional = detect_regional_and_cache(
+                        Utf8Path::new(fp),
+                        hashes,
+                        cache,
+                        &mut filepath_buffer,
+                    )
+                    .1;
 
                     let path = if matches!(&regional, Regionalized::None) {
                         Utf8Path::new(fp)
@@ -747,15 +840,21 @@ impl Discovery {
                     };
                     // let hash = Hash40::const_new(fp);
 
-                    files.entry(path.into_hash()).or_default().set_by_regionalized(DiscoveredFile {
-                        root_index: root_idx,
-                        regionalized: regional,
-                        kind: FileKind::Compressed {
-                            start: file.compressed_data_range().0 as u32,
-                            compressed_size: wayfinder.compressed_size_hint() as u32,
-                            decompressed_size: wayfinder.uncompressed_size_hint() as u32,
-                        }
-                    }, regional);
+                    files
+                        .entry(path.into_hash())
+                        .or_default()
+                        .set_by_regionalized(
+                            DiscoveredFile {
+                                root_index: root_idx,
+                                regionalized: regional,
+                                kind: FileKind::Compressed {
+                                    start: file.compressed_data_range().0 as u32,
+                                    compressed_size: wayfinder.compressed_size_hint() as u32,
+                                    decompressed_size: wayfinder.uncompressed_size_hint() as u32,
+                                },
+                            },
+                            regional,
+                        );
                     compressed_files += 1;
                 }
             }

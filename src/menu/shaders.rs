@@ -1,5 +1,5 @@
 //! This module is the pride and joy of stratus
-//! 
+//!
 //! These shaders are a `.nushdb` file that is embedded into the main executable.
 //!
 //! Through some reverse engineering effort, we were able to isolate the shader code vs. control
@@ -32,8 +32,7 @@ pub struct PerDrawCBuffer {
 }
 
 // Manually impl traits because the derive doesn't like padding ig
-unsafe impl Pod for PerDrawCBuffer {
-}
+unsafe impl Pod for PerDrawCBuffer {}
 
 unsafe impl Zeroable for PerDrawCBuffer {
     fn zeroed() -> Self {
@@ -41,7 +40,7 @@ unsafe impl Zeroable for PerDrawCBuffer {
             world_matrix: glam::Mat4::zeroed(),
             base_color: glam::Vec4::zeroed(),
             world_inverse_matrix: glam::Mat4::zeroed(),
-            padding: [0u8; 0x70]
+            padding: [0u8; 0x70],
         }
     }
 }
@@ -52,7 +51,7 @@ impl Default for PerDrawCBuffer {
             world_matrix: Mat4::IDENTITY,
             base_color: Vec4::ONE,
             world_inverse_matrix: Mat4::IDENTITY,
-            padding: [0u8; 0x70]
+            padding: [0u8; 0x70],
         }
     }
 }
@@ -170,8 +169,11 @@ impl VertexPipeline {
         polygon_state.set_front_face(1);
         polygon_state.set_polygon_mode(2);
 
-        channel_state.set_defaults();
         multisample_state.set_defaults();
+        // multisample_state.set_multisample_enable(true);
+        // multisample_state.set_samples(4);
+
+        channel_state.set_defaults();
         depth_stencil_state.set_defaults();
 
         Self {
@@ -183,7 +185,7 @@ impl VertexPipeline {
             channel_state,
             multisample_state,
             polygon_state,
-            depth_stencil_state
+            depth_stencil_state,
         }
     }
 
@@ -209,10 +211,26 @@ pub struct TextureVertex {
 }
 
 impl TextureVertex {
-    pub const TOP_LEFT: Self = Self { position: glam::Vec3A::new(-0.5, -0.5, 0.0), texcoord: glam::Vec2::ZERO, _padding: glam::Vec2::ZERO };
-    pub const TOP_RIGHT: Self = Self { position: glam::Vec3A::new(0.5, -0.5, 0.0), texcoord: glam::Vec2::new(1.0, 0.0), _padding: glam::Vec2::ZERO };
-    pub const BOTTOM_LEFT: Self = Self { position: glam::Vec3A::new(-0.5, 0.5, 0.0), texcoord: glam::Vec2::new(0.0, 1.0), _padding: glam::Vec2::ZERO };
-    pub const BOTTOM_RIGHT: Self = Self { position: glam::Vec3A::new(0.5, 0.5, 0.0), texcoord: glam::Vec2::ONE, _padding: glam::Vec2::ZERO };
+    pub const TOP_LEFT: Self = Self {
+        position: glam::Vec3A::new(-0.5, -0.5, 0.0),
+        texcoord: glam::Vec2::ZERO,
+        _padding: glam::Vec2::ZERO,
+    };
+    pub const TOP_RIGHT: Self = Self {
+        position: glam::Vec3A::new(0.5, -0.5, 0.0),
+        texcoord: glam::Vec2::new(1.0, 0.0),
+        _padding: glam::Vec2::ZERO,
+    };
+    pub const BOTTOM_LEFT: Self = Self {
+        position: glam::Vec3A::new(-0.5, 0.5, 0.0),
+        texcoord: glam::Vec2::new(0.0, 1.0),
+        _padding: glam::Vec2::ZERO,
+    };
+    pub const BOTTOM_RIGHT: Self = Self {
+        position: glam::Vec3A::new(0.5, 0.5, 0.0),
+        texcoord: glam::Vec2::ONE,
+        _padding: glam::Vec2::ZERO,
+    };
 }
 
 pub struct TexturePipeline {
@@ -233,13 +251,20 @@ impl TexturePipeline {
         let (fctrl, fcode) = get_shaders(StaticShaderData::SystemDebugDrawTexture2DPS);
 
         let program = ManagedProgram::new(device, vctrl, vcode, fctrl, fcode);
-        let mut attrib_state = [nvn::VertexAttribState::zeroed(), nvn::VertexAttribState::zeroed(), nvn::VertexAttribState::zeroed()];
+        let mut attrib_state = [
+            nvn::VertexAttribState::zeroed(),
+            nvn::VertexAttribState::zeroed(),
+            nvn::VertexAttribState::zeroed(),
+        ];
         attrib_state[0].set_defaults();
         attrib_state[0].set_format(nvn::Format::Rgb32, 0);
         attrib_state[0].set_stream_index(0);
         attrib_state[1].set_defaults();
         attrib_state[2].set_defaults();
-        attrib_state[2].set_format(nvn::Format::Rg32, std::mem::size_of::<glam::Vec3A>() as isize);
+        attrib_state[2].set_format(
+            nvn::Format::Rg32,
+            std::mem::size_of::<glam::Vec3A>() as isize,
+        );
         attrib_state[2].set_stream_index(0);
 
         let mut stream_state = nvn::VertexStreamState::zeroed();
@@ -267,8 +292,11 @@ impl TexturePipeline {
         polygon_state.set_front_face(1);
         polygon_state.set_polygon_mode(2);
 
-        channel_state.set_defaults();
         multisample_state.set_defaults();
+        // multisample_state.set_multisample_enable(true);
+        // multisample_state.set_samples(4);
+
+        channel_state.set_defaults();
         depth_stencil_state.set_defaults();
 
         Self {
@@ -280,7 +308,7 @@ impl TexturePipeline {
             channel_state,
             multisample_state,
             polygon_state,
-            depth_stencil_state
+            depth_stencil_state,
         }
     }
 

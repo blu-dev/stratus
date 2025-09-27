@@ -9,7 +9,8 @@ use crate::{
         FileData, FileDescriptor, FileEntity, FileGroup, FileInfo, FilePackage, FilePackageChild,
         FilePath, IntoHash, SearchFolder, SearchPath, SearchPathLink, StreamData, StreamEntity,
         StreamFolder, StreamPath,
-    }, HashDisplay,
+    },
+    HashDisplay,
 };
 
 #[repr(C)]
@@ -531,37 +532,56 @@ impl Archive {
             .search_path_link
             .push(SearchPathLink::new(index));
 
-        assert!(self.search
-            .search_path_lookup
-            .insert(path.path(), link_index).is_none(), "{}", path.path().display());
+        assert!(
+            self.search
+                .search_path_lookup
+                .insert(path.path(), link_index)
+                .is_none(),
+            "{}",
+            path.path().display()
+        );
         link_index
     }
 
     #[track_caller]
     pub fn insert_search_folder(&mut self, folder: SearchFolder) -> u32 {
         let new_index = self.search.search_folder.push(folder);
-        assert!(self
-            .search
-            .search_folder_lookup
-            .insert(folder.path(), new_index).is_none(), "{}", folder.path().display());
+        assert!(
+            self.search
+                .search_folder_lookup
+                .insert(folder.path(), new_index)
+                .is_none(),
+            "{}",
+            folder.path().display()
+        );
         new_index
     }
 
     #[track_caller]
     pub fn insert_file_path(&mut self, path: FilePath) -> u32 {
         let path_idx = self.push_file_path(path);
-        assert!(self.resource
-            .file_path_lookup
-            .insert(path.path_and_entity.hash40(), path_idx).is_none(), "{}", path.path().display());
+        assert!(
+            self.resource
+                .file_path_lookup
+                .insert(path.path_and_entity.hash40(), path_idx)
+                .is_none(),
+            "{}",
+            path.path().display()
+        );
         path_idx
     }
 
     #[track_caller]
     pub fn insert_file_package(&mut self, package: FilePackage) -> u32 {
         let package_idx = self.push_file_package(package);
-        assert!(self.resource
-            .file_package_lookup
-            .insert(package.path(), package_idx).is_none(), "{}", package.path().display());
+        assert!(
+            self.resource
+                .file_package_lookup
+                .insert(package.path(), package_idx)
+                .is_none(),
+            "{}",
+            package.path().display()
+        );
         package_idx
     }
 
@@ -606,10 +626,7 @@ impl Archive {
         let resource = ResourceTables::from_bytes(resource_slice);
         let search = SearchTables::from_bytes(search_slice);
 
-        Self {
-            resource,
-            search,
-        }
+        Self { resource, search }
     }
 
     pub fn resource_blob(&self) -> &[u8] {

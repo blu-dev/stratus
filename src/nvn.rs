@@ -1,4 +1,7 @@
-use std::{ops::{Deref, DerefMut}, ptr::NonNull};
+use std::{
+    ops::{Deref, DerefMut},
+    ptr::NonNull,
+};
 
 pub mod abstraction;
 
@@ -260,6 +263,7 @@ pub enum TextureTarget {
     D1 = 0x0,
     D2 = 0x1,
     D3 = 0x2,
+    D2Multisample = 0x5,
 }
 
 bitflags::bitflags! {
@@ -280,6 +284,28 @@ bitflags::bitflags! {
         /// [`Self::CPU_UNCACHED`] and [`Self::GPU_CACHED`]
         const STANDARD = (1 << 1) | (1 << 5);
     }
+}
+
+#[repr(u32)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum WrapMode {
+    Clamp = 0,
+    Repeat = 1,
+    MirrorClamp = 2,
+    MirrorClampEdge = 3,
+    MirrorClampBorder = 4,
+    ClampBorder = 5,
+    MirrorRepeat = 6,
+    ClampEdge = 7,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct DrawTextureRegion {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
 }
 
 decl_api! {
@@ -313,6 +339,7 @@ decl_api! {
         SubmitCommands(count: i32, handles: *const CommandHandle) | mut;
         pub FenceSync(sync: &mut Sync, condition: u32, flags: u32)| mut;
         pub PresentTexture(window: &mut Window, texture: i32) | mut;
+        pub WaitSync(sync: &mut Sync) | mut;
     }
 
     pub WindowBuilder(align=8, size=0x40) {
@@ -362,6 +389,7 @@ decl_api! {
         pub SetDefaults() | mut;
         pub SetDevice(device: &Device) | mut;
         pub SetMinMagFilter(min: u32, mag: u32) | mut;
+        pub SetWrapMode(x: WrapMode, y: WrapMode, z: WrapMode) | mut;
     }
 
     pub Sampler(align=8, size=0x60) {
@@ -375,6 +403,7 @@ decl_api! {
         pub SetFlags(flags: u32) | mut;
         pub SetTarget(target: TextureTarget) | mut;
         pub SetFormat(format: Format) | mut;
+        pub SetSamples(samples: i32) | mut;
         pub SetSize2D(width: i32, height: i32) | mut;
         pub SetStorage(pool: &MemoryPool, offset: isize) | mut;
         pub GetStorageSize() -> usize;
@@ -419,6 +448,8 @@ decl_api! {
         pub DrawArrays(prim: u32, first: i32, count: i32) | mut;
         pub DrawElements(prim: u32, index_kind: u32, count: i32, handle: BufferAddress);
         pub DrawElementsInstanced(prim: u32, index_ty: u32, count: u32, index_buffer: BufferAddress, base_vertex: i32, base_instance: i32, instance_count: i32) | mut;
+        pub Downsample(src: &Texture, dst: &Texture) | mut;
+        pub DrawTexture(handle: TextureHandle, dst_region: &DrawTextureRegion, src_region: &DrawTextureRegion) | mut;
 
         pub EndRecording() -> CommandHandle | mut;
     }
@@ -469,6 +500,8 @@ decl_api! {
 
     pub MultisampleState(align=8, size=0x18) {
         pub SetDefaults() | mut;
+        pub SetMultisampleEnable(enable: bool) | mut;
+        pub SetSamples(samples: i32) | mut;
     }
 
     pub DepthStencilState(align=8, size=8) {

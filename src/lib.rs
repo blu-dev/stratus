@@ -1,8 +1,14 @@
 use std::{
-    collections::{HashMap, HashSet}, ffi::CStr, io::Read, ops::Deref, ptr::NonNull, sync::{
+    collections::{HashMap, HashSet},
+    ffi::CStr,
+    io::Read,
+    ops::Deref,
+    ptr::NonNull,
+    sync::{
         atomic::{AtomicBool, Ordering},
         OnceLock,
-    }, time::Instant
+    },
+    time::Instant,
 };
 
 use camino::Utf8Path;
@@ -11,14 +17,21 @@ use skyline::hooks::InlineCtx;
 use smash_hash::{Hash40, Hash40Map, Hash40Set};
 
 use crate::{
-    archive::{decompress_stream, Archive, ZstdBuffer}, data::{
-        FileData, FileDescriptor, FileEntity, FileGroup, FileInfo, FileInfoFlags, FileLoadMethod, FilePackage, FilePackageChild, FilePath, IntoHash, Locale, Region, SearchFolder, SearchPath, TryFilePathResult
-    }, filesystem::{Discovery, FileSystem}, hash_interner::{DisplayHash, HashMemorySlab}, logger::NxKernelLogger, mount_save::Language
+    archive::{decompress_stream, Archive, ZstdBuffer},
+    data::{
+        FileData, FileDescriptor, FileEntity, FileGroup, FileInfo, FileInfoFlags, FileLoadMethod,
+        FilePackage, FilePackageChild, FilePath, IntoHash, Locale, Region, SearchFolder,
+        SearchPath, TryFilePathResult,
+    },
+    filesystem::{Discovery, FileSystem},
+    hash_interner::{DisplayHash, HashMemorySlab},
+    logger::NxKernelLogger,
+    mount_save::Language,
 };
 
 mod archive;
-mod fixes;
 mod filesystem;
+mod fixes;
 
 #[allow(dead_code)]
 mod containers;
@@ -121,9 +134,12 @@ fn init_hashes() {
         let blob_path: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/hashes.blob");
         let meta_path: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/hashes.meta");
         let hashes_src: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/Hashes_FullPath");
-        let cached_blob_path: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/hashes_cached.blob");
-        let cached_meta_path: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/hashes_cached.meta");
-        let cached_fs_blob_path: &'static Utf8Path = Utf8Path::new("sd:/ultimate/stratus/fs_cached.blob");
+        let cached_blob_path: &'static Utf8Path =
+            Utf8Path::new("sd:/ultimate/stratus/hashes_cached.blob");
+        let cached_meta_path: &'static Utf8Path =
+            Utf8Path::new("sd:/ultimate/stratus/hashes_cached.meta");
+        let cached_fs_blob_path: &'static Utf8Path =
+            Utf8Path::new("sd:/ultimate/stratus/fs_cached.blob");
 
         if cached_blob_path.exists()
             && cached_meta_path.exists()
@@ -136,7 +152,7 @@ fn init_hashes() {
 
             return ReadOnlyFileSystem {
                 hashes: HashMemorySlab::from_blob(slab.into_boxed_slice(), meta.into_boxed_slice()),
-                file_system: FileSystem::from_bytes(fs_blob.into_boxed_slice())
+                file_system: FileSystem::from_bytes(fs_blob.into_boxed_slice()),
             };
         }
 
@@ -394,7 +410,8 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
     }
 
     // SAFETY: This path is only going to be called from the ResInflateThread, so this being a "static" variable is effectively a TLS variable
-    if let Some(file) = ReadOnlyFileSystem::file_system().lookup_file(path, *LocalePreferences::get())
+    if let Some(file) =
+        ReadOnlyFileSystem::file_system().lookup_file(path, *LocalePreferences::get())
     {
         // SAFETY: See above
         log::info!("[jemalloc_hook] Replacing {}", path.display());
@@ -407,12 +424,13 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
         // and don't need to repeat the file IO here. The data_ptr should get replaced the next time that the game needs to load
         // something so we don't need to worry about other file loads reading from that pointer
         if unsafe { *res_service.add(0x234).cast::<u32>() == 0x4 } {
-            ptr = ReadOnlyFileSystem::file_system().decompress_file(
-                file,
-                unsafe { NonNull::new_unchecked(*res_service.add(0x218).cast::<*mut u8>()) },
-                alignment as usize,
-            )
-            .as_ptr();
+            ptr = ReadOnlyFileSystem::file_system()
+                .decompress_file(
+                    file,
+                    unsafe { NonNull::new_unchecked(*res_service.add(0x218).cast::<*mut u8>()) },
+                    alignment as usize,
+                )
+                .as_ptr();
         } else {
             ptr = ReadOnlyFileSystem::file_system()
                 .read_file(
@@ -586,7 +604,8 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
 
     // SAFETY: Referencing BUFFER here is safe since this is an inline hook only ever called from within
     // ResLoadingThread. It effectively becomes a function local variable
-    if let Some(file) = ReadOnlyFileSystem::file_system().lookup_file(path, *LocalePreferences::get())
+    if let Some(file) =
+        ReadOnlyFileSystem::file_system().lookup_file(path, *LocalePreferences::get())
     {
         log::info!(
             "[process_single_patched_file_request] Replacing file {}",
@@ -799,11 +818,15 @@ fn initial_loading(_ctx: &InlineCtx) {
                     let packaged_len = std::fs::metadata(&packaged_path).unwrap().len() as usize;
                     let search_len = std::fs::metadata(&search_path).unwrap().len() as usize;
                     let mut packaged_buf = unsafe {
-                        let ptr = std::alloc::alloc(std::alloc::Layout::from_size_align(packaged_len, 0x10).unwrap());
+                        let ptr = std::alloc::alloc(
+                            std::alloc::Layout::from_size_align(packaged_len, 0x10).unwrap(),
+                        );
                         Box::from_raw(std::slice::from_raw_parts_mut(ptr, packaged_len))
                     };
                     let mut search_buf = unsafe {
-                        let ptr = std::alloc::alloc(std::alloc::Layout::from_size_align(search_len, 0x10).unwrap());
+                        let ptr = std::alloc::alloc(
+                            std::alloc::Layout::from_size_align(search_len, 0x10).unwrap(),
+                        );
                         Box::from_raw(std::slice::from_raw_parts_mut(ptr, search_len))
                     };
 
@@ -811,7 +834,9 @@ fn initial_loading(_ctx: &InlineCtx) {
                     packaged.read_exact(&mut packaged_buf).unwrap();
                     let mut search = std::fs::File::open(&search_path).unwrap();
                     search.read_exact(&mut search_buf).unwrap();
-                    return ReadOnlyArchive(unsafe { archive::Archive::from_blobs(packaged_buf, search_buf) });
+                    return ReadOnlyArchive(unsafe {
+                        archive::Archive::from_blobs(packaged_buf, search_buf)
+                    });
                 }
             }
         }
@@ -845,11 +870,19 @@ fn initial_loading(_ctx: &InlineCtx) {
         for package in archive.iter_file_package() {
             println!("{} ({:?})", package.path().display(), package.flags());
             if package.has_sym_link() {
-                println!("\tSYM: {} ({:?})", package.sym_link().path().display(), package.sym_link().flags());
+                println!(
+                    "\tSYM: {} ({:?})",
+                    package.sym_link().path().display(),
+                    package.sym_link().flags()
+                );
             }
             println!("CHILDREN");
             for child in package.child_packages() {
-                println!("\t:{} ({:?})", child.package().path().display(), child.package().flags());
+                println!(
+                    "\t:{} ({:?})",
+                    child.package().path().display(),
+                    child.package().flags()
+                );
             }
             println!("INFOS");
             for info in package.infos() {
@@ -857,11 +890,16 @@ fn initial_loading(_ctx: &InlineCtx) {
             }
         }
 
-        archive.lookup_file_package_mut("fighter/samusd/result").unwrap().set_child_package_range(0, 0);
+        archive
+            .lookup_file_package_mut("fighter/samusd/result")
+            .unwrap()
+            .set_child_package_range(0, 0);
 
         let mut component_buffer = [""; 16];
         let hashes = ReadOnlyFileSystem::hashes();
-        for (file, size) in ReadOnlyFileSystem::file_system().iter_file_sizes(*LocalePreferences::get()) {
+        for (file, size) in
+            ReadOnlyFileSystem::file_system().iter_file_sizes(*LocalePreferences::get())
+        {
             // Just means that the user didn't have a hashes file
             if archive.lookup_file_path(file).is_some() {
                 continue;
@@ -869,7 +907,9 @@ fn initial_loading(_ctx: &InlineCtx) {
 
             let package;
 
-            let component_count = hashes.buffer_str_components_for(file, &mut component_buffer).unwrap();
+            let component_count = hashes
+                .buffer_str_components_for(file, &mut component_buffer)
+                .unwrap();
 
             if component_count == 0 {
                 continue;
@@ -896,32 +936,34 @@ fn initial_loading(_ctx: &InlineCtx) {
 
                     let slot = component_buffer[4];
                     if slot.starts_with('c') {
-                        if !matches!(slot, "c00" | "c01" | "c02" | "c03" | "c04" | "c05" | "c06" | "c07") {
-                            duplicated_fighter_packages.entry(Hash40::const_new(fighter_name)).or_default().insert(Hash40::const_new(slot));
+                        if !matches!(
+                            slot,
+                            "c00" | "c01" | "c02" | "c03" | "c04" | "c05" | "c06" | "c07"
+                        ) {
+                            duplicated_fighter_packages
+                                .entry(Hash40::const_new(fighter_name))
+                                .or_default()
+                                .insert(Hash40::const_new(slot));
                         }
 
-
-                        package = 
-                            Hash40::const_new("fighter")
-                                .const_with("/")
-                                .const_with(fighter_name)
-                                .const_with("/")
-                                .const_with(slot)
-                        ;
+                        package = Hash40::const_new("fighter")
+                            .const_with("/")
+                            .const_with(fighter_name)
+                            .const_with("/")
+                            .const_with(slot);
                     } else {
                         continue;
                     }
-                },
+                }
                 "stage" => {
                     package = parent.const_trim_trailing("/");
-                },
+                }
                 "ui" => {
                     package = parent.const_trim_trailing("/");
-                }, 
-                _ => continue
+                }
+                _ => continue,
             }
 
-                
             if archive.lookup_file_package(package).is_none() {
                 if component_buffer[0] == "stage"
                     && component_count == 6 // stage / <stage> / <battle | normal> / <subfolder> / <new package name> / <file>
@@ -943,7 +985,10 @@ fn initial_loading(_ctx: &InlineCtx) {
                 }
             }
 
-            new_files_by_package.entry(package).or_default().push((FilePath::from_parts(file, parent, file_name, extension, 0xFFFFFF), size));
+            new_files_by_package.entry(package).or_default().push((
+                FilePath::from_parts(file, parent, file_name, extension, 0xFFFFFF),
+                size,
+            ));
         }
 
         let mut retarget_buffer = Vec::new();
@@ -953,42 +998,166 @@ fn initial_loading(_ctx: &InlineCtx) {
                 continue;
             }
             for new_costume in new_costumes {
-                packages::duplicate_fighter_costume_package(&mut archive, fighter_name, Hash40::const_new("fighter/").const_with_hash(fighter_name).const_with("/c00"), new_costume);
+                packages::duplicate_fighter_costume_package(
+                    &mut archive,
+                    fighter_name,
+                    Hash40::const_new("fighter/")
+                        .const_with_hash(fighter_name)
+                        .const_with("/c00"),
+                    new_costume,
+                );
                 if fighter_name == Hash40::const_new("samusd") {
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/samusd/result/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/samusd/result/c00".into_hash(),
+                        new_costume,
+                    );
                     retarget_buffer.push((
                         Hash40::const_new("fighter/samusd/result/").const_with_hash(new_costume),
-                        Hash40::const_new("fighter/samusd/model/bunshin/").const_with_hash(new_costume),
-                        Hash40::const_new("fighter/samusd/model/body/").const_with_hash(new_costume),
+                        Hash40::const_new("fighter/samusd/model/bunshin/")
+                            .const_with_hash(new_costume),
+                        Hash40::const_new("fighter/samusd/model/body/")
+                            .const_with_hash(new_costume),
                     ))
                 }
                 if fighter_name == Hash40::const_new("kirby") {
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/mario/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/luigi/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/donkey/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/link/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/samus/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/samusd/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/yoshi/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/fox/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/pikachu/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/ness/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/captain/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/purin/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/peach/kirbycopy/c00".into_hash(), new_costume);
-                    packages::duplicate_fighter_costume_package(&mut archive, fighter_name, "fighter/pickel/kirbycopy/c00".into_hash(), new_costume);
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/mario/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/luigi/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/donkey/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/link/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/samus/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/samusd/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/yoshi/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/fox/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/pikachu/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/ness/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/captain/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/purin/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/peach/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
+                    packages::duplicate_fighter_costume_package(
+                        &mut archive,
+                        fighter_name,
+                        "fighter/pickel/kirbycopy/c00".into_hash(),
+                        new_costume,
+                    );
                 }
             }
         }
 
-        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c08".into_hash());
-        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c09".into_hash());
-        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c10".into_hash());
-        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c11".into_hash());
-        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c12".into_hash());
-        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c13".into_hash());
-        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c14".into_hash());
-        packages::duplicate_fighter_costume_package(&mut archive, "inkling".into_hash(), "fighter/inkling/c00".into_hash(), "c15".into_hash());
+        packages::duplicate_fighter_costume_package(
+            &mut archive,
+            "inkling".into_hash(),
+            "fighter/inkling/c00".into_hash(),
+            "c08".into_hash(),
+        );
+        packages::duplicate_fighter_costume_package(
+            &mut archive,
+            "inkling".into_hash(),
+            "fighter/inkling/c00".into_hash(),
+            "c09".into_hash(),
+        );
+        packages::duplicate_fighter_costume_package(
+            &mut archive,
+            "inkling".into_hash(),
+            "fighter/inkling/c00".into_hash(),
+            "c10".into_hash(),
+        );
+        packages::duplicate_fighter_costume_package(
+            &mut archive,
+            "inkling".into_hash(),
+            "fighter/inkling/c00".into_hash(),
+            "c11".into_hash(),
+        );
+        packages::duplicate_fighter_costume_package(
+            &mut archive,
+            "inkling".into_hash(),
+            "fighter/inkling/c00".into_hash(),
+            "c12".into_hash(),
+        );
+        packages::duplicate_fighter_costume_package(
+            &mut archive,
+            "inkling".into_hash(),
+            "fighter/inkling/c00".into_hash(),
+            "c13".into_hash(),
+        );
+        packages::duplicate_fighter_costume_package(
+            &mut archive,
+            "inkling".into_hash(),
+            "fighter/inkling/c00".into_hash(),
+            "c14".into_hash(),
+        );
+        packages::duplicate_fighter_costume_package(
+            &mut archive,
+            "inkling".into_hash(),
+            "fighter/inkling/c00".into_hash(),
+            "c15".into_hash(),
+        );
 
         for package_idx in 0..archive.num_file_package() {
             let package = archive.get_file_package(package_idx as u32).unwrap();
@@ -1015,8 +1184,9 @@ fn initial_loading(_ctx: &InlineCtx) {
                     // To figure out which one of these it is, we look at the file descriptor's load method. The correct way would be
                     // to check if the index of the file info is >= the index of the first FileGroup's FileInfo. Perhaps at a later
                     // date we will do it that way
-                    if info.file_path().index() == shared_info.file_path().index() 
-                        || info.flags().intersects(FileInfoFlags::IS_RETARGETED) {
+                    if info.file_path().index() == shared_info.file_path().index()
+                        || info.flags().intersects(FileInfoFlags::IS_RETARGETED)
+                    {
                         if shared_info.desc().load_method().is_skip() {
                             // rename_cache.insert(shared_info.index());
                         } else {
@@ -1090,7 +1260,9 @@ fn initial_loading(_ctx: &InlineCtx) {
         }
 
         let now = std::time::Instant::now();
-        for (path, size) in ReadOnlyFileSystem::file_system().iter_file_sizes(*LocalePreferences::get()) {
+        for (path, size) in
+            ReadOnlyFileSystem::file_system().iter_file_sizes(*LocalePreferences::get())
+        {
             if let Some(path) = archive.lookup_file_path_mut(path) {
                 let path_hash = path.path_and_entity.hash40();
 
@@ -1238,14 +1410,54 @@ fn initial_loading(_ctx: &InlineCtx) {
             }
         }
 
-        packages::retarget_files(&mut archive, "fighter/samusd/result/c00", "fighter/samusd/model/bunshin/c00", "fighter/samusd/model/body/c00");
-        packages::retarget_files(&mut archive, "fighter/samusd/result/c01", "fighter/samusd/model/bunshin/c01", "fighter/samusd/model/body/c01");
-        packages::retarget_files(&mut archive, "fighter/samusd/result/c02", "fighter/samusd/model/bunshin/c02", "fighter/samusd/model/body/c02");
-        packages::retarget_files(&mut archive, "fighter/samusd/result/c03", "fighter/samusd/model/bunshin/c03", "fighter/samusd/model/body/c03");
-        packages::retarget_files(&mut archive, "fighter/samusd/result/c04", "fighter/samusd/model/bunshin/c04", "fighter/samusd/model/body/c04");
-        packages::retarget_files(&mut archive, "fighter/samusd/result/c05", "fighter/samusd/model/bunshin/c05", "fighter/samusd/model/body/c05");
-        packages::retarget_files(&mut archive, "fighter/samusd/result/c06", "fighter/samusd/model/bunshin/c06", "fighter/samusd/model/body/c06");
-        packages::retarget_files(&mut archive, "fighter/samusd/result/c07", "fighter/samusd/model/bunshin/c07", "fighter/samusd/model/body/c07");
+        packages::retarget_files(
+            &mut archive,
+            "fighter/samusd/result/c00",
+            "fighter/samusd/model/bunshin/c00",
+            "fighter/samusd/model/body/c00",
+        );
+        packages::retarget_files(
+            &mut archive,
+            "fighter/samusd/result/c01",
+            "fighter/samusd/model/bunshin/c01",
+            "fighter/samusd/model/body/c01",
+        );
+        packages::retarget_files(
+            &mut archive,
+            "fighter/samusd/result/c02",
+            "fighter/samusd/model/bunshin/c02",
+            "fighter/samusd/model/body/c02",
+        );
+        packages::retarget_files(
+            &mut archive,
+            "fighter/samusd/result/c03",
+            "fighter/samusd/model/bunshin/c03",
+            "fighter/samusd/model/body/c03",
+        );
+        packages::retarget_files(
+            &mut archive,
+            "fighter/samusd/result/c04",
+            "fighter/samusd/model/bunshin/c04",
+            "fighter/samusd/model/body/c04",
+        );
+        packages::retarget_files(
+            &mut archive,
+            "fighter/samusd/result/c05",
+            "fighter/samusd/model/bunshin/c05",
+            "fighter/samusd/model/body/c05",
+        );
+        packages::retarget_files(
+            &mut archive,
+            "fighter/samusd/result/c06",
+            "fighter/samusd/model/bunshin/c06",
+            "fighter/samusd/model/body/c06",
+        );
+        packages::retarget_files(
+            &mut archive,
+            "fighter/samusd/result/c07",
+            "fighter/samusd/model/bunshin/c07",
+            "fighter/samusd/model/body/c07",
+        );
 
         for (package, old_parent, new_parent) in retarget_buffer {
             packages::retarget_files(&mut archive, package, old_parent, new_parent);
@@ -1258,7 +1470,6 @@ fn initial_loading(_ctx: &InlineCtx) {
         // let mut new_files_no_package: Vec<&NewFile> = Vec::new();
 
         let now = std::time::Instant::now();
-        
 
         println!(
             "[stratus::patching] Built file-addition cache and updated search section in {:.3}s",
@@ -1341,7 +1552,9 @@ fn initial_loading(_ctx: &InlineCtx) {
                 if archive.lookup_file_path(file.path()).is_some() {
                     continue;
                 }
-                let component_count = hashes.buffer_str_components_for(file.path(), &mut component_buffer).unwrap();
+                let component_count = hashes
+                    .buffer_str_components_for(file.path(), &mut component_buffer)
+                    .unwrap();
                 let parent_components = component_count - 1;
                 let mut current_parent = Hash40::const_new("");
                 for component in component_buffer.iter().take(parent_components).copied() {
@@ -1448,9 +1661,21 @@ fn initial_loading(_ctx: &InlineCtx) {
             now.elapsed().as_secs_f32()
         );
 
-        std::fs::write(Utf8Path::new(STRATUS_FOLDER).join("fschecksum.bin"), ReadOnlyFileSystem::file_system().checksum().to_le_bytes()).unwrap();
-        std::fs::write(Utf8Path::new(STRATUS_FOLDER).join("packaged.bin"), archive.resource_blob()).unwrap();
-        std::fs::write(Utf8Path::new(STRATUS_FOLDER).join("search.bin"), archive.search_blob()).unwrap();
+        std::fs::write(
+            Utf8Path::new(STRATUS_FOLDER).join("fschecksum.bin"),
+            ReadOnlyFileSystem::file_system().checksum().to_le_bytes(),
+        )
+        .unwrap();
+        std::fs::write(
+            Utf8Path::new(STRATUS_FOLDER).join("packaged.bin"),
+            archive.resource_blob(),
+        )
+        .unwrap();
+        std::fs::write(
+            Utf8Path::new(STRATUS_FOLDER).join("search.bin"),
+            archive.search_blob(),
+        )
+        .unwrap();
 
         ReadOnlyArchive(archive)
     });
@@ -1502,6 +1727,7 @@ pub fn main() {
         );
     }));
 
+    ninput::init();
     menu::init_menu();
     logger::install_hooks();
 
@@ -1513,7 +1739,7 @@ pub fn main() {
 
     unsafe {
         set_overclock_enabled(true);
-        set_cpu_boost_mode(1);
+        // set_cpu_boost_mode(1);
     }
 
     init_folder();
@@ -1527,7 +1753,7 @@ pub fn main() {
     unsafe { log::set_max_level_racy(LevelFilter::Info) };
 
     unsafe {
-        set_cpu_boost_mode(0);
+        // set_cpu_boost_mode(0);
     }
 
     skyline::install_hooks!(

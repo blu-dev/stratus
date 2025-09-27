@@ -1,4 +1,7 @@
-use std::{fmt::{Debug, Display}, ops::Range};
+use std::{
+    fmt::{Debug, Display},
+    ops::Range,
+};
 
 use bytemuck::{Pod, Zeroable};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -266,7 +269,7 @@ bitflags::bitflags! {
 
         // Stratus exclusive flags, set by file table patching
         // for customized behavior or further diagnostic information at runtime
-    
+
         /// Indicates that a file was retargeted. This means that the file needs to stay shared
         /// to a file even if that file has a different file name. This allows us to work with
         /// files that conceptually make sense to stay shared, like Dark Samus's `bunshin` article

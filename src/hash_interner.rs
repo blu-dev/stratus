@@ -566,7 +566,10 @@ impl HashMemorySlab {
             let comp_idx = start + el as usize;
             let string_idx = unsafe { (*self.components)[comp_idx].to_u32() };
             if string_idx & IS_INTERNED_COMPONENT != 0 {
-                written += self.buffer_components_for_recursive((string_idx & !IS_INTERNED_COMPONENT) as usize, &mut components[written..]);
+                written += self.buffer_components_for_recursive(
+                    (string_idx & !IS_INTERNED_COMPONENT) as usize,
+                    &mut components[written..],
+                );
             } else {
                 let string = unsafe { (*self.strings)[string_idx as usize] };
                 let byte_start = string.start().to_u32() as usize;
@@ -597,11 +600,15 @@ impl HashMemorySlab {
 
         match bucket.binary_search_by(|a| a.shifted_hash.cmp(&shifted_hash)) {
             Ok(idx) => Some(self.buffer_components_for_recursive(start_idx + idx, components)),
-            Err(_) => None
-        }       
+            Err(_) => None,
+        }
     }
 
-    fn buffer_str_components_for_recursive<'a>(&'a self, index: usize, components: &mut [&'a str]) -> usize {
+    fn buffer_str_components_for_recursive<'a>(
+        &'a self,
+        index: usize,
+        components: &mut [&'a str],
+    ) -> usize {
         let range = unsafe { (*self.hashes)[index].range };
         let start = range.start().to_u32() as usize;
         let mut written = 0;
@@ -612,7 +619,10 @@ impl HashMemorySlab {
             let comp_idx = start + el as usize;
             let string_idx = unsafe { (*self.components)[comp_idx].to_u32() };
             if string_idx & IS_INTERNED_COMPONENT != 0 {
-                written += self.buffer_str_components_for_recursive((string_idx & !IS_INTERNED_COMPONENT) as usize, &mut components[written..]);
+                written += self.buffer_str_components_for_recursive(
+                    (string_idx & !IS_INTERNED_COMPONENT) as usize,
+                    &mut components[written..],
+                );
             } else {
                 let string = unsafe { (*self.strings)[string_idx as usize] };
                 let byte_start = string.start().to_u32() as usize;
@@ -626,7 +636,11 @@ impl HashMemorySlab {
         written
     }
 
-    pub fn buffer_str_components_for<'a>(&'a self, hash: Hash40, components: &mut [&'a str]) -> Option<usize> {
+    pub fn buffer_str_components_for<'a>(
+        &'a self,
+        hash: Hash40,
+        components: &mut [&'a str],
+    ) -> Option<usize> {
         // SAFETY: Within this function, we index into slices that we have properly set up in the constructor
         let bucket_idx = hash.crc32() as usize % HASH_BUCKET_COUNT;
         let len = unsafe { (*self.bucket_lengths)[bucket_idx] };
@@ -637,7 +651,7 @@ impl HashMemorySlab {
 
         match bucket.binary_search_by(|a| a.shifted_hash.cmp(&shifted_hash)) {
             Ok(idx) => Some(self.buffer_str_components_for_recursive(start_idx + idx, components)),
-            Err(_) => None
+            Err(_) => None,
         }
     }
 }
