@@ -164,17 +164,69 @@ pub fn install_lazy_loading_patches() {
     );
 }
 
+#[repr(C)]
+#[derive(Default, Copy, Clone)]
+struct InklingEffect {
+    vtable: u64,
+    ptr_a: u64,
+    ptr_b: u64,
+    unk: u64,
+}
+
+impl InklingEffect {
+    const fn new() -> Self {
+        Self {
+            vtable: 0,
+            ptr_a: 0,
+            ptr_b: 0,
+            unk: 0
+        }
+    }
+}
+
+static mut INKLING_EXTENDED_EFFECTS_A: [InklingEffect; 8] = [InklingEffect::new(); 8];
+static mut INKLING_EXTENDED_EFFECTS_B: [InklingEffect; 8] = [InklingEffect::new(); 8];
+
+// #[skyline::hook(offset = 0x35bf35c, inline)]
+// fn fix_effect_a_ptr(ctx: &mut InlineCtx) {
+//     if ctx.registers[21].x() == 8 {
+//         ctx.registers[25].set_x(unsafe { &INKLING_EXTENDED_EFFECTS_A[0].ptr_a as *const u64 as u64 });
+//     }
+// }
+
+// #[skyline::hook(offset = 0x35bf508, inline)]
+// fn fix_effect_b_ptr(ctx: &mut InlineCtx) {
+//     if ctx.registers[21].x() == 8 {
+//         ctx.registers[25].set_x(unsafe { &INKLING_EXTENDED_EFFECTS_B[0].ptr_a as *const u64 as u64 });
+//     }
+// }
+
 pub fn install_inkling() {
+    // let vtable_addr = unsafe {
+    //     skyline::hooks::getRegionAddress(skyline::hooks::Region::Text).cast::<u8>().add(0x522fd18) as u64
+    // };
+
+    unsafe {
+        // INKLING_EXTENDED_EFFECTS_A.iter_mut().for_each(|effect| effect.vtable = vtable_addr);
+        // INKLING_EXTENDED_EFFECTS_B.iter_mut().for_each(|effect| effect.vtable = vtable_addr);
+        // skyline::patching::Patch::in_text(0x35bf35c).data(0xF100427Fu32).unwrap();
+        // skyline::patching::Patch::in_text(0x35bf508).data(0xF10042BFu32).unwrap();
+        // skyline::patching::Patch::in_text(0x35baed8).nop().unwrap();
+        // skyline::patching::Patch::in_text(0x35bb964).nop().unwrap();
+    }
+
     #[skyline::hook(offset = 0x35bb960, inline)]
     fn set_inkling_color(ctx: &mut InlineCtx) {
-        let x = ctx.registers[24].x() % 8;
-        ctx.registers[24].set_x(x);
+        unsafe {
+            ctx.registers[24].set_x(super::INKLING_COLOR_MAP[ctx.registers[24].x() as usize] as u64);
+        }
     }
 
     #[skyline::hook(offset = 0x35baed4, inline)]
     fn set_inkling_color_2(ctx: &mut InlineCtx) {
-        let x = ctx.registers[20].x() % 8;
-        ctx.registers[20].set_x(x);
+        unsafe {
+            ctx.registers[20].set_x(super::INKLING_COLOR_MAP[ctx.registers[20].x() as usize] as u64);
+        }
     }
 
     skyline::install_hooks!(set_inkling_color, set_inkling_color_2);

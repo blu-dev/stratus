@@ -1,18 +1,16 @@
 use std::{alloc::Layout, cell::RefCell, collections::VecDeque, rc::Rc, thread::JoinHandle, time::Instant};
 
 use ::envy::{LayoutTree, Node, NodeDisjointAccessor, NodeUpdateCallback, NodeVisibility, SublayoutNode, TextNode};
+use hound::WavReader;
 use ninput::Buttons;
 
 use crate::{
-    menu::{
+    audio::LoopingAudio, menu::{
         envy::{NvnBackend, NvnBackendStage},
         shaders::{PerDrawCBuffer, PerViewCBuffer, VertexPipeline},
-    },
-    nvn::{
-        self,
-        abstraction::{BufferVec, ManagedCommandBuffer, ManagedMemoryPool, SwapChain},
-        align_up, DisplayHandle, LayerHandle, WindowHandle, PAGE_ALIGNMENT,
-    },
+    }, nvn::{
+        self, DisplayHandle, LayerHandle, PAGE_ALIGNMENT, WindowHandle, abstraction::{BufferVec, ManagedCommandBuffer, ManagedMemoryPool, SwapChain}, align_up
+    }
 };
 
 mod envy;
@@ -650,6 +648,20 @@ impl<T> LocalChannel<T> {
 }
 
 extern "C" fn menu_thread(_: *mut skyline::libc::c_void) {
+    // let mut wav = WavReader::new(std::io::Cursor::new(include_bytes!("bgm.wav"))).unwrap();
+    // let samples: Vec<i16> = wav.samples::<i16>().map(|x| x.unwrap()).collect();
+    // let audio = LoopingAudio::new(
+    //     samples,
+    //     151836 * 2,
+    //     1776452 * 2,
+    //     0.5,
+    //     0.0,
+    //     30,
+    //     3.0
+    // );
+
+    // audio.start();
+
     let mut display = DisplayHandle::new();
     let mut layer = LayerHandle::new();
     let mut window = WindowHandle::new();

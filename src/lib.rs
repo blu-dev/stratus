@@ -867,34 +867,6 @@ fn initial_loading(_ctx: &InlineCtx) {
         let mut new_packages_by_parent: Hash40Map<Hash40Set> = Hash40Map::default();
         let mut new_files_by_package: Hash40Map<Vec<(FilePath, u32)>> = Hash40Map::default();
 
-        for package in archive.iter_file_package() {
-            println!("{} ({:?})", package.path().display(), package.flags());
-            if package.has_sym_link() {
-                println!(
-                    "\tSYM: {} ({:?})",
-                    package.sym_link().path().display(),
-                    package.sym_link().flags()
-                );
-            }
-            println!("CHILDREN");
-            for child in package.child_packages() {
-                println!(
-                    "\t:{} ({:?})",
-                    child.package().path().display(),
-                    child.package().flags()
-                );
-            }
-            println!("INFOS");
-            for info in package.infos() {
-                println!("\t{}", info.file_path().path().display());
-            }
-        }
-
-        archive
-            .lookup_file_package_mut("fighter/samusd/result")
-            .unwrap()
-            .set_child_package_range(0, 0);
-
         let mut component_buffer = [""; 16];
         let hashes = ReadOnlyFileSystem::hashes();
         for (file, size) in
@@ -1701,9 +1673,50 @@ fn set_samusd_bunshin_string(ctx: &mut InlineCtx) {
     ctx.registers[1].set_x(SAMUSD_BUNSHIN_STRING.as_ptr() as u64);
 }
 
-#[skyline::hook(offset = 0xb0b19c, inline)]
-fn set_inkling_max_count(ctx: &mut InlineCtx) {
-    ctx.registers[14].set_x(8);
+// #[skyline::hook(offset = 0xb0b19c, inline)]
+// fn set_inkling_max_count(ctx: &mut InlineCtx) {
+//     ctx.registers[14].set_x(8);
+// }
+
+static mut INKLING_COLOR_MAP: [u32; 0x100] = [0; 0x100];
+
+static mut INKLING_COLOR_BUFFER: [glam::Vec4; 0x100] = [glam::Vec4::ZERO; 0x100];
+
+#[skyline::hook(offset = 0xb0b1b0, inline)]
+fn change_ptr_2(ctx: &mut InlineCtx) {
+    unsafe {
+        ctx.registers[1].set_x(INKLING_COLOR_BUFFER.as_mut_ptr() as u64);
+    }
+}
+
+#[skyline::hook(offset = 0xb0b16c, inline)]
+fn change_ptr_for_src_buffer(ctx: &mut InlineCtx) {
+    unsafe {
+        ctx.registers[11].set_x(8 + INKLING_COLOR_BUFFER.as_mut_ptr() as u64);
+    }
+}
+
+#[skyline::hook(offset = 0x35bfafc, inline)]
+fn map_param_stage_ink_color_constant_buffer(ctx: &InlineCtx) {
+    let buffer = unsafe { &**((ctx.registers[20].x() + 0x98) as *const *const nvn::Buffer) };
+    let color_array = buffer.map().cast::<glam::Vec4>();
+
+    for id in 0..8 {
+        if let Some(entry) = smash::app::FighterManager::instance().unwrap().get_fighter_entry(id) {
+            let battle_object = unsafe {
+                *(entry as *const smash::app::FighterEntry).cast::<u8>().add(0x4160).cast::<*const smash::app::BattleObject>()
+            };
+
+            if unsafe { (*battle_object).kind } == smash::app::FighterKind::Inkling as i32 {
+                let color = unsafe { (*(*battle_object).module_accessor).work().get_int(smash::app::work_ids::fighter::instance::COLOR) };
+                unsafe {
+                    *color_array.add(id as usize) = INKLING_COLOR_BUFFER[color as usize];
+                    INKLING_COLOR_MAP[color as usize] = id as u32;
+                }
+            }
+        }
+    }
+
 }
 
 #[skyline::main(name = "stratus")]
@@ -1729,17 +1742,19 @@ pub fn main() {
 
     ninput::init();
     menu::init_menu();
-    logger::install_hooks();
+    // logger::install_hooks();
 
     fixes::install_lazy_loading_patches();
     fixes::install_inkling();
 
     mount_save::get_locale_from_user_save();
 
+    skyline::install_hooks!(change_ptr_for_src_buffer, map_param_stage_ink_color_constant_buffer);
+
 
     unsafe {
         set_overclock_enabled(true);
-        // set_cpu_boost_mode(1);
+        set_cpu_boost_mode(1);
     }
 
     init_folder();
@@ -1753,7 +1768,7 @@ pub fn main() {
     unsafe { log::set_max_level_racy(LevelFilter::Info) };
 
     unsafe {
-        // set_cpu_boost_mode(0);
+        set_cpu_boost_mode(0);
     }
 
     skyline::install_hooks!(
@@ -1770,6 +1785,5 @@ pub fn main() {
         panic_set_invalid_state,
         observe_load_package,
         set_samusd_bunshin_string,
-        set_inkling_max_count
     );
 }

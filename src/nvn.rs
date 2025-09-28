@@ -466,6 +466,9 @@ decl_api! {
         pub GetAddress() -> BufferAddress;
         pub Map() -> *mut u8;
         pub FlushMappedRange(offset: isize, size: usize);
+        pub GetMemoryOffset() -> isize;
+        pub GetMemoryPool() -> *const MemoryPool;
+        pub GetSize() -> usize;
     }
 
     pub BufferBuilder(align=8, size=0x40) {
