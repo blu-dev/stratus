@@ -1,16 +1,15 @@
-use std::{alloc::Layout, cell::RefCell, collections::VecDeque, rc::Rc, thread::JoinHandle, time::Instant};
+use std::{alloc::Layout, cell::RefCell, collections::VecDeque, rc::Rc};
 
-use ::envy::{LayoutTree, Node, NodeDisjointAccessor, NodeUpdateCallback, NodeVisibility, SublayoutNode, TextNode};
-use hound::WavReader;
+use ::envy::{LayoutTree, NodeDisjointAccessor, NodeUpdateCallback, NodeVisibility, SublayoutNode};
 use ninput::Buttons;
 
 use crate::{
-    audio::LoopingAudio, menu::{
-        envy::{NvnBackend, NvnBackendStage},
-        shaders::{PerDrawCBuffer, PerViewCBuffer, VertexPipeline},
-    }, nvn::{
-        self, DisplayHandle, LayerHandle, PAGE_ALIGNMENT, WindowHandle, abstraction::{BufferVec, ManagedCommandBuffer, ManagedMemoryPool, SwapChain}, align_up
-    }
+    menu::envy::NvnBackend,
+    nvn::{
+        self,
+        abstraction::{ManagedCommandBuffer, ManagedMemoryPool, SwapChain},
+        align_up, DisplayHandle, LayerHandle, WindowHandle, PAGE_ALIGNMENT,
+    },
 };
 
 mod envy;
@@ -62,13 +61,13 @@ unsafe extern "C" {
     unsafe fn nn_oe_finish_startup();
 }
 
-#[skyline::from_offset(0x37fceb0)]
+#[skyline::from_offset(0x37fdf30)]
 extern "C" fn smash_gfx_alloc(size: usize, align: usize, user_data: *mut ()) -> *mut u8;
 
-#[skyline::from_offset(0x37fcf70)]
+#[skyline::from_offset(0x37fdff0)]
 extern "C" fn smash_gfx_free(ptr: *mut u8, user_data: *mut ());
 
-#[skyline::from_offset(0x37fcfb0)]
+#[skyline::from_offset(0x37fe030)]
 extern "C" fn smash_gfx_realloc(ptr: *mut u8, new_size: usize, user_data: *mut ()) -> *mut u8;
 
 #[skyline::hook(replace = nv_set_graphics_alloc)]
@@ -93,10 +92,9 @@ fn alloc_aligned_buffer(size: usize, align: usize) -> Box<[u8]> {
 static mut SHOULD_SHUT_DOWN: bool = false;
 static mut PROMISED_HANDLE: Option<Box<skyline::nn::os::ThreadType>> = None;
 
-#[skyline::hook(offset = 0x37fa140, inline)]
-unsafe fn wait_for_graphics(ctx: &skyline::hooks::InlineCtx) {
-    crate::initial_loading(ctx);
-    // SHOULD_SHUT_DOWN = true;
+#[skyline::hook(offset = 0x37fb1c0, inline)]
+unsafe fn wait_for_graphics(_ctx: &skyline::hooks::InlineCtx) {
+    crate::initial_loading_impl();
     let mut thread = PROMISED_HANDLE.take().unwrap();
     skyline::nn::os::WaitThread(&mut *thread);
     skyline::nn::os::DestroyThread(&mut *thread);
@@ -158,21 +156,35 @@ impl NodeUpdateCallback<NvnBackend> for MainMenuButton {
         }
 
         let mut sublayout = node.self_mut();
-        let sublayout = sublayout.downcast_mut::<SublayoutNode<NvnBackend>>().unwrap().as_layout_mut();
+        let sublayout = sublayout
+            .downcast_mut::<SublayoutNode<NvnBackend>>()
+            .unwrap()
+            .as_layout_mut();
         match self.this.recv() {
             Some(MainMenuButtonEvent::Select) => {
                 self.is_selected = true;
-                sublayout.get_node_by_path_mut("select").unwrap().set_visibility(NodeVisibility::Visible);
-                sublayout.get_node_by_path_mut("unselect").unwrap().set_visibility(NodeVisibility::Hidden);
-            },
+                sublayout
+                    .get_node_by_path_mut("select")
+                    .unwrap()
+                    .set_visibility(NodeVisibility::Visible);
+                sublayout
+                    .get_node_by_path_mut("unselect")
+                    .unwrap()
+                    .set_visibility(NodeVisibility::Hidden);
+            }
             Some(MainMenuButtonEvent::Unselect) => {
                 self.is_selected = false;
-                sublayout.get_node_by_path_mut("select").unwrap().set_visibility(NodeVisibility::Hidden);
-                sublayout.get_node_by_path_mut("unselect").unwrap().set_visibility(NodeVisibility::Visible);
-            },
+                sublayout
+                    .get_node_by_path_mut("select")
+                    .unwrap()
+                    .set_visibility(NodeVisibility::Hidden);
+                sublayout
+                    .get_node_by_path_mut("unselect")
+                    .unwrap()
+                    .set_visibility(NodeVisibility::Visible);
+            }
             None => {}
         }
-
     }
 }
 
@@ -201,43 +213,63 @@ impl VirtualController {
     }
 
     fn up(&self) -> bool {
-        self.0.iter().any(|controller| controller.pressed_buttons.intersects(Buttons::up()))
+        self.0
+            .iter()
+            .any(|controller| controller.pressed_buttons.intersects(Buttons::up()))
     }
 
     fn down(&self) -> bool {
-        self.0.iter().any(|controller| controller.pressed_buttons.intersects(Buttons::down()))
+        self.0
+            .iter()
+            .any(|controller| controller.pressed_buttons.intersects(Buttons::down()))
     }
 
     fn right(&self) -> bool {
-        self.0.iter().any(|controller| controller.pressed_buttons.intersects(Buttons::right()))
+        self.0
+            .iter()
+            .any(|controller| controller.pressed_buttons.intersects(Buttons::right()))
     }
 
     fn left(&self) -> bool {
-        self.0.iter().any(|controller| controller.pressed_buttons.intersects(Buttons::left()))
+        self.0
+            .iter()
+            .any(|controller| controller.pressed_buttons.intersects(Buttons::left()))
     }
 
     fn select(&self) -> bool {
-        self.0.iter().any(|controller| controller.pressed_buttons.intersects(Buttons::A))
+        self.0
+            .iter()
+            .any(|controller| controller.pressed_buttons.intersects(Buttons::A))
     }
 
     fn cancel(&self) -> bool {
-        self.0.iter().any(|controller| controller.pressed_buttons.intersects(Buttons::B))
+        self.0
+            .iter()
+            .any(|controller| controller.pressed_buttons.intersects(Buttons::B))
     }
 
     fn shoulder_r(&self) -> bool {
-        self.0.iter().any(|controller| controller.pressed_buttons.intersects(Buttons::R))
+        self.0
+            .iter()
+            .any(|controller| controller.pressed_buttons.intersects(Buttons::R))
     }
 
     fn shoulder_l(&self) -> bool {
-        self.0.iter().any(|controller| controller.pressed_buttons.intersects(Buttons::L))
+        self.0
+            .iter()
+            .any(|controller| controller.pressed_buttons.intersects(Buttons::L))
     }
 
     fn shoulder_r_down(&self) -> bool {
-        self.0.iter().any(|controller| controller.buttons.intersects(Buttons::R))
+        self.0
+            .iter()
+            .any(|controller| controller.buttons.intersects(Buttons::R))
     }
 
     fn shoulder_l_down(&self) -> bool {
-        self.0.iter().any(|controller| controller.buttons.intersects(Buttons::L))
+        self.0
+            .iter()
+            .any(|controller| controller.buttons.intersects(Buttons::L))
     }
 }
 
@@ -253,7 +285,7 @@ fn init_main_menu(
     root: &mut LayoutTree<NvnBackend>,
     root_channel: LocalChannel<RootEvent>,
     scene: Rc<RefCell<MenuScene>>,
-    controller: Rc<RefCell<VirtualController>>
+    controller: Rc<RefCell<VirtualController>>,
 ) {
     let mm_buttons = root
         .get_node_by_path_mut("Stratus/Main Menu/mm_btns")
@@ -267,9 +299,27 @@ fn init_main_menu(
         "main_menu_btn_quit",
     ];
     let mm_button_labels = ["Play", "Mods", "Settings", "Update", "Quit"];
-    let mm_marks = ["category/icon/mark_play", "category/icon/mark_mods", "category/icon/mark_settings", "category/icon/mark_update", "category/icon/mark_quit"];
-    let mm_channels = [LocalChannel::new(), LocalChannel::new(), LocalChannel::new(), LocalChannel::new(), LocalChannel::new()];
-    let mm_events = [RootEvent::Play, RootEvent::ShowMods, RootEvent::ShowSettings, RootEvent::ShowUpdate, RootEvent::Quit];
+    let mm_marks = [
+        "category/icon/mark_play",
+        "category/icon/mark_mods",
+        "category/icon/mark_settings",
+        "category/icon/mark_update",
+        "category/icon/mark_quit",
+    ];
+    let mm_channels = [
+        LocalChannel::new(),
+        LocalChannel::new(),
+        LocalChannel::new(),
+        LocalChannel::new(),
+        LocalChannel::new(),
+    ];
+    let mm_events = [
+        RootEvent::Play,
+        RootEvent::ShowMods,
+        RootEvent::ShowSettings,
+        RootEvent::ShowUpdate,
+        RootEvent::Quit,
+    ];
 
     for idx in 0..5 {
         let prev = mm_channels[(idx + 4) % 5].clone();
@@ -288,9 +338,7 @@ fn init_main_menu(
             is_scene_default: idx == 0,
             was_disabled: false,
         });
-        let layout = node
-            .as_sublayout_mut()
-            .as_layout_mut();
+        let layout = node.as_sublayout_mut().as_layout_mut();
         layout
             .get_node_by_path_mut("select")
             .unwrap()
@@ -304,29 +352,34 @@ fn init_main_menu(
             .unwrap()
             .as_text_mut()
             .set_text(mm_button_labels[idx]);
-        layout.get_node_by_path_mut(mm_marks[idx]).unwrap().set_visibility(NodeVisibility::Inherited);
+        layout
+            .get_node_by_path_mut(mm_marks[idx])
+            .unwrap()
+            .set_visibility(NodeVisibility::Inherited);
     }
 
     mm_channels[0].send(MainMenuButtonEvent::Select);
 
     let controller = controller.clone();
-    root.get_node_by_path_mut("Stratus/Main Menu/stratus_icon").unwrap().add_on_update(move |node: NodeDisjointAccessor<NvnBackend>| {
-        if *scene.borrow() != MenuScene::MainMenu {
-            return;
-        }
+    root.get_node_by_path_mut("Stratus/Main Menu/stratus_icon")
+        .unwrap()
+        .add_on_update(move |node: NodeDisjointAccessor<NvnBackend>| {
+            if *scene.borrow() != MenuScene::MainMenu {
+                return;
+            }
 
-        let controller = controller.borrow();
-        let mut node = node.self_mut();
-        if controller.shoulder_r_down() {
-            node.transform_mut().angle += 3.0;
-            node.mark_changed();
-        }
+            let controller = controller.borrow();
+            let mut node = node.self_mut();
+            if controller.shoulder_r_down() {
+                node.transform_mut().angle += 3.0;
+                node.mark_changed();
+            }
 
-        if controller.shoulder_l_down() {
-            node.transform_mut().angle -= 3.0;
-            node.mark_changed();
-        }
-    });
+            if controller.shoulder_l_down() {
+                node.transform_mut().angle -= 3.0;
+                node.mark_changed();
+            }
+        });
 }
 
 struct ModListEntry {
@@ -405,13 +458,13 @@ impl NodeUpdateCallback<NvnBackend> for ModsList {
                 let mut sibling = node.sibling_mut("mod_page_btn_list").unwrap();
 
                 sibling
-                        .downcast_mut::<SublayoutNode<NvnBackend>>()
-                        .unwrap()
-                        .as_layout_mut()
-                        .get_node_by_path_mut("mod_page_bg/mod_page_txt")
-                        .unwrap()
-                        .as_text_mut()
-                        .set_text(format!("Mods (1/{page_count})"));
+                    .downcast_mut::<SublayoutNode<NvnBackend>>()
+                    .unwrap()
+                    .as_layout_mut()
+                    .get_node_by_path_mut("mod_page_bg/mod_page_txt")
+                    .unwrap()
+                    .as_text_mut()
+                    .set_text(format!("Mods (1/{page_count})"));
                 sibling.mark_changed();
             }
 
@@ -423,9 +476,19 @@ impl NodeUpdateCallback<NvnBackend> for ModsList {
                     child.set_visibility(NodeVisibility::Inherited);
                     let layout = child.downcast_mut::<SublayoutNode<NvnBackend>>().unwrap();
                     let layout = layout.as_layout_mut();
-                    layout.get_node_by_path_mut("select/btn_item_decide").unwrap().set_visibility(NodeVisibility::Hidden);
-                    layout.get_node_by_path_mut("unselect").unwrap().set_visibility(NodeVisibility::Inherited);
-                    layout.get_node_by_path_mut("mod_txt_name").unwrap().as_text_mut().set_text(&self.entries[idx].name);
+                    layout
+                        .get_node_by_path_mut("select/btn_item_decide")
+                        .unwrap()
+                        .set_visibility(NodeVisibility::Hidden);
+                    layout
+                        .get_node_by_path_mut("unselect")
+                        .unwrap()
+                        .set_visibility(NodeVisibility::Inherited);
+                    layout
+                        .get_node_by_path_mut("mod_txt_name")
+                        .unwrap()
+                        .as_text_mut()
+                        .set_text(&self.entries[idx].name);
                     layout.play_animation_looping("select");
                 }
 
@@ -439,7 +502,10 @@ impl NodeUpdateCallback<NvnBackend> for ModsList {
         let mut new_local = self.current_local;
 
         if controller.down() {
-            if self.current_local == 5 || (self.current_page == page_count - 1 && self.current_local == (self.entries.len() - self.current_page * 6 - 1)) {
+            if self.current_local == 5
+                || (self.current_page == page_count - 1
+                    && self.current_local == (self.entries.len() - self.current_page * 6 - 1))
+            {
                 new_local = 0;
                 new_page = (self.current_page + 1) % page_count;
             } else {
@@ -465,22 +531,32 @@ impl NodeUpdateCallback<NvnBackend> for ModsList {
             } else {
                 new_page = self.current_page + 1;
             }
-            new_local = self.current_local.min(self.entries.len() - new_page * 6 - 1);
+            new_local = self
+                .current_local
+                .min(self.entries.len() - new_page * 6 - 1);
         } else if controller.shoulder_l() {
             if self.current_page == 0 {
                 new_page = page_count - 1;
             } else {
                 new_page = self.current_page - 1;
             }
-            new_local = self.current_local.min(self.entries.len() - new_page * 6 - 1);
+            new_local = self
+                .current_local
+                .min(self.entries.len() - new_page * 6 - 1);
         };
 
         if new_local != self.current_local {
             let mut old = node.child_mut(child_names[self.current_local]).unwrap();
             let layout = old.downcast_mut::<SublayoutNode<NvnBackend>>().unwrap();
             let layout = layout.as_layout_mut();
-            layout.get_node_by_path_mut("select/btn_item_decide").unwrap().set_visibility(NodeVisibility::Hidden);
-            layout.get_node_by_path_mut("unselect").unwrap().set_visibility(NodeVisibility::Inherited);
+            layout
+                .get_node_by_path_mut("select/btn_item_decide")
+                .unwrap()
+                .set_visibility(NodeVisibility::Hidden);
+            layout
+                .get_node_by_path_mut("unselect")
+                .unwrap()
+                .set_visibility(NodeVisibility::Inherited);
         }
 
         if new_page != self.current_page {
@@ -490,13 +566,13 @@ impl NodeUpdateCallback<NvnBackend> for ModsList {
                 let mut sibling = node.sibling_mut("mod_page_btn_list").unwrap();
 
                 sibling
-                        .downcast_mut::<SublayoutNode<NvnBackend>>()
-                        .unwrap()
-                        .as_layout_mut()
-                        .get_node_by_path_mut("mod_page_bg/mod_page_txt")
-                        .unwrap()
-                        .as_text_mut()
-                        .set_text(format!("Mods ({}/{page_count})", new_page + 1));
+                    .downcast_mut::<SublayoutNode<NvnBackend>>()
+                    .unwrap()
+                    .as_layout_mut()
+                    .get_node_by_path_mut("mod_page_bg/mod_page_txt")
+                    .unwrap()
+                    .as_text_mut()
+                    .set_text(format!("Mods ({}/{page_count})", new_page + 1));
                 sibling.mark_changed();
             }
 
@@ -509,14 +585,26 @@ impl NodeUpdateCallback<NvnBackend> for ModsList {
                     child.set_visibility(NodeVisibility::Inherited);
                     let layout = child.downcast_mut::<SublayoutNode<NvnBackend>>().unwrap();
                     let layout = layout.as_layout_mut();
-                    layout.get_node_by_path_mut("select/btn_item_decide").unwrap().set_visibility(NodeVisibility::Hidden);
-                    layout.get_node_by_path_mut("unselect").unwrap().set_visibility(NodeVisibility::Inherited);
-                    layout.get_node_by_path_mut("mod_txt_name").unwrap().as_text_mut().set_text(&self.entries[idx].name);
-                    layout.get_node_by_path_mut("on").unwrap().set_visibility(if self.entries[idx].is_enabled {
-                        NodeVisibility::Inherited
-                    } else {
-                        NodeVisibility::Hidden
-                    });
+                    layout
+                        .get_node_by_path_mut("select/btn_item_decide")
+                        .unwrap()
+                        .set_visibility(NodeVisibility::Hidden);
+                    layout
+                        .get_node_by_path_mut("unselect")
+                        .unwrap()
+                        .set_visibility(NodeVisibility::Inherited);
+                    layout
+                        .get_node_by_path_mut("mod_txt_name")
+                        .unwrap()
+                        .as_text_mut()
+                        .set_text(&self.entries[idx].name);
+                    layout.get_node_by_path_mut("on").unwrap().set_visibility(
+                        if self.entries[idx].is_enabled {
+                            NodeVisibility::Inherited
+                        } else {
+                            NodeVisibility::Hidden
+                        },
+                    );
                 }
 
                 child.mark_changed();
@@ -532,18 +620,51 @@ impl NodeUpdateCallback<NvnBackend> for ModsList {
         {
             let mut sibling = node.sibling_mut("mod_info").unwrap();
 
-            let layout = sibling.downcast_mut::<SublayoutNode<NvnBackend>>().unwrap().as_layout_mut();
+            let layout = sibling
+                .downcast_mut::<SublayoutNode<NvnBackend>>()
+                .unwrap()
+                .as_layout_mut();
             layout
-                    .get_node_by_path_mut("Preview/mod_number_bg/num_txt")
-                    .unwrap()
-                    .as_text_mut()
-                    .set_text(format!("{}/{}", self.current_page * 6 + self.current_local + 1, entry_count));
-            layout.get_node_by_path_mut("Preview/mod_category_txt").unwrap().as_text_mut().set_text(if entry.is_zip_file { "Compressed Zip File" } else { "Mod Folder" });
-            layout.get_node_by_path_mut("Preview/mod_name_txt").unwrap().as_text_mut().set_text(&entry.name);
-            layout.get_node_by_path_mut("txt_info/Info").unwrap().as_text_mut().set_text(
-                format!("Authors: {}\nVersion: {}", if entry.authors.is_empty() { "???".to_string() } else { entry.authors.join(", ") }, entry.version.as_deref().unwrap_or("???"))
-            );
-            layout.get_node_by_path_mut("txt_info/Description").unwrap().as_text_mut().set_text(entry.description.as_deref().unwrap_or(""));
+                .get_node_by_path_mut("Preview/mod_number_bg/num_txt")
+                .unwrap()
+                .as_text_mut()
+                .set_text(format!(
+                    "{}/{}",
+                    self.current_page * 6 + self.current_local + 1,
+                    entry_count
+                ));
+            layout
+                .get_node_by_path_mut("Preview/mod_category_txt")
+                .unwrap()
+                .as_text_mut()
+                .set_text(if entry.is_zip_file {
+                    "Compressed Zip File"
+                } else {
+                    "Mod Folder"
+                });
+            layout
+                .get_node_by_path_mut("Preview/mod_name_txt")
+                .unwrap()
+                .as_text_mut()
+                .set_text(&entry.name);
+            layout
+                .get_node_by_path_mut("txt_info/Info")
+                .unwrap()
+                .as_text_mut()
+                .set_text(format!(
+                    "Authors: {}\nVersion: {}",
+                    if entry.authors.is_empty() {
+                        "???".to_string()
+                    } else {
+                        entry.authors.join(", ")
+                    },
+                    entry.version.as_deref().unwrap_or("???")
+                ));
+            layout
+                .get_node_by_path_mut("txt_info/Description")
+                .unwrap()
+                .as_text_mut()
+                .set_text(entry.description.as_deref().unwrap_or(""));
 
             sibling.mark_changed();
         }
@@ -555,13 +676,21 @@ impl NodeUpdateCallback<NvnBackend> for ModsList {
         let mut showing = node.child_mut(child_names[self.current_local]).unwrap();
         let layout = showing.downcast_mut::<SublayoutNode<NvnBackend>>().unwrap();
         let layout = layout.as_layout_mut();
-        layout.get_node_by_path_mut("select/btn_item_decide").unwrap().set_visibility(NodeVisibility::Inherited);
-        layout.get_node_by_path_mut("unselect").unwrap().set_visibility(NodeVisibility::Hidden);
-        layout.get_node_by_path_mut("on").unwrap().set_visibility(if self.entries[self.current_page * 6 + self.current_local].is_enabled {
-            NodeVisibility::Inherited
-        } else {
-            NodeVisibility::Hidden
-        });
+        layout
+            .get_node_by_path_mut("select/btn_item_decide")
+            .unwrap()
+            .set_visibility(NodeVisibility::Inherited);
+        layout
+            .get_node_by_path_mut("unselect")
+            .unwrap()
+            .set_visibility(NodeVisibility::Hidden);
+        layout.get_node_by_path_mut("on").unwrap().set_visibility(
+            if self.entries[self.current_page * 6 + self.current_local].is_enabled {
+                NodeVisibility::Inherited
+            } else {
+                NodeVisibility::Hidden
+            },
+        );
 
         self.was_disabled_last = false;
     }
@@ -571,28 +700,30 @@ fn init_mods(
     root: &mut LayoutTree<NvnBackend>,
     channel: LocalChannel<RootEvent>,
     scene: Rc<RefCell<MenuScene>>,
-    controller: Rc<RefCell<VirtualController>>
+    controller: Rc<RefCell<VirtualController>>,
 ) {
-    root.get_node_by_path_mut("Stratus/Mods/mod_btns").unwrap().add_on_update(ModsList {
-        controller: controller.clone(),
-        scene,
-        root: channel,
-        entries: vec![
-            ModListEntry::zip("HDR-Skins"),
-            ModListEntry::zip("HDR-Stages"),
-            ModListEntry::zip("Ponytail Peach"),
-            ModListEntry::new("Thwomp Kirby (C08)"),
-            ModListEntry::new("Knuckles"),
-            ModListEntry::new("Colored Turnips"),
-            ModListEntry::zip("P5D Joker"),
-            ModListEntry::new("Octoling (C13)"),
-            ModListEntry::new("MP2 Dark Samus (C09)"),
-            ModListEntry::zip("Secret Sauce"),
-        ],
-        current_local: 0,
-        current_page: 0,
-        was_disabled_last: true
-    });
+    root.get_node_by_path_mut("Stratus/Mods/mod_btns")
+        .unwrap()
+        .add_on_update(ModsList {
+            controller: controller.clone(),
+            scene,
+            root: channel,
+            entries: vec![
+                ModListEntry::zip("HDR-Skins"),
+                ModListEntry::zip("HDR-Stages"),
+                ModListEntry::zip("Ponytail Peach"),
+                ModListEntry::new("Thwomp Kirby (C08)"),
+                ModListEntry::new("Knuckles"),
+                ModListEntry::new("Colored Turnips"),
+                ModListEntry::zip("P5D Joker"),
+                ModListEntry::new("Octoling (C13)"),
+                ModListEntry::new("MP2 Dark Samus (C09)"),
+                ModListEntry::zip("Secret Sauce"),
+            ],
+            current_local: 0,
+            current_page: 0,
+            was_disabled_last: true,
+        });
 }
 
 fn initialize_root(
@@ -603,24 +734,46 @@ fn initialize_root(
     let controller = Rc::new(RefCell::new(VirtualController::new()));
 
     // Set the version in the header
-    layout.get_node_by_path_mut("Stratus/Background/top_header/ver_txt")
+    layout
+        .get_node_by_path_mut("Stratus/Background/top_header/ver_txt")
         .unwrap()
         .as_text_mut()
         .set_text(concat!("Version ", env!("CARGO_PKG_VERSION")));
 
     // Update visibility of root root nodes
-    layout.get_node_by_path_mut("Stratus/Main Menu").unwrap().set_visibility(NodeVisibility::Inherited);
-    layout.get_node_by_path_mut("Stratus/Settings").unwrap().set_visibility(NodeVisibility::Hidden);
-    layout.get_node_by_path_mut("Stratus/Mods").unwrap().set_visibility(NodeVisibility::Hidden);
-    layout.get_node_by_path_mut("Stratus/Update").unwrap().set_visibility(NodeVisibility::Hidden);
+    layout
+        .get_node_by_path_mut("Stratus/Main Menu")
+        .unwrap()
+        .set_visibility(NodeVisibility::Inherited);
+    layout
+        .get_node_by_path_mut("Stratus/Settings")
+        .unwrap()
+        .set_visibility(NodeVisibility::Hidden);
+    layout
+        .get_node_by_path_mut("Stratus/Mods")
+        .unwrap()
+        .set_visibility(NodeVisibility::Hidden);
+    layout
+        .get_node_by_path_mut("Stratus/Update")
+        .unwrap()
+        .set_visibility(NodeVisibility::Hidden);
 
     init_main_menu(layout, channel.clone(), scene.clone(), controller.clone());
     init_mods(layout, channel.clone(), scene.clone(), controller.clone());
 
     // Entrance Anims
-    layout.get_node_by_path_mut("Stratus/Background/bg_set").unwrap().as_sublayout_mut().as_layout_mut().play_animation("entrance");
-    layout.get_node_by_path_mut("Stratus/Background/top_header").unwrap().as_sublayout_mut().as_layout_mut().play_animation("entrance");
-
+    layout
+        .get_node_by_path_mut("Stratus/Background/bg_set")
+        .unwrap()
+        .as_sublayout_mut()
+        .as_layout_mut()
+        .play_animation("entrance");
+    layout
+        .get_node_by_path_mut("Stratus/Background/top_header")
+        .unwrap()
+        .as_sublayout_mut()
+        .as_layout_mut()
+        .play_animation("entrance");
 
     controller
 }
@@ -752,13 +905,13 @@ extern "C" fn menu_thread(_: *mut skyline::libc::c_void) {
 
         let scene = Rc::new(RefCell::new(MenuScene::MainMenu));
         let root_channel = LocalChannel::new();
-        let controller = initialize_root(layout.as_layout_mut(), root_channel.clone(), scene.clone());
+        let controller =
+            initialize_root(layout.as_layout_mut(), root_channel.clone(), scene.clone());
 
         loop {
             let texture_index = swapchain.acquire();
             queue.fence_sync(&mut cmdbuf_sync, 0, 0);
             queue.flush();
-
 
             controller.borrow_mut().update();
             layout.update();
@@ -773,38 +926,84 @@ extern "C" fn menu_thread(_: *mut skyline::libc::c_void) {
                     RootEvent::ShowMainMenu => {
                         *scene.borrow_mut() = MenuScene::MainMenu;
                         let layout = layout.as_layout_mut();
-                        layout.get_node_by_path_mut("Stratus/Main Menu").unwrap().set_visibility(NodeVisibility::Inherited);
-                        layout.get_node_by_path_mut("Stratus/Mods").unwrap().set_visibility(NodeVisibility::Hidden);
-                        layout.get_node_by_path_mut("Stratus/Settings").unwrap().set_visibility(NodeVisibility::Hidden);
-                        layout.get_node_by_path_mut("Stratus/Update").unwrap().set_visibility(NodeVisibility::Hidden);
-                    },
+                        layout
+                            .get_node_by_path_mut("Stratus/Main Menu")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Inherited);
+                        layout
+                            .get_node_by_path_mut("Stratus/Mods")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Hidden);
+                        layout
+                            .get_node_by_path_mut("Stratus/Settings")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Hidden);
+                        layout
+                            .get_node_by_path_mut("Stratus/Update")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Hidden);
+                    }
                     RootEvent::ShowMods => {
                         *scene.borrow_mut() = MenuScene::Mods;
                         let layout = layout.as_layout_mut();
-                        layout.get_node_by_path_mut("Stratus/Main Menu").unwrap().set_visibility(NodeVisibility::Hidden);
-                        layout.get_node_by_path_mut("Stratus/Mods").unwrap().set_visibility(NodeVisibility::Inherited);
-                        layout.get_node_by_path_mut("Stratus/Settings").unwrap().set_visibility(NodeVisibility::Hidden);
-                        layout.get_node_by_path_mut("Stratus/Update").unwrap().set_visibility(NodeVisibility::Hidden);
-                    },
+                        layout
+                            .get_node_by_path_mut("Stratus/Main Menu")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Hidden);
+                        layout
+                            .get_node_by_path_mut("Stratus/Mods")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Inherited);
+                        layout
+                            .get_node_by_path_mut("Stratus/Settings")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Hidden);
+                        layout
+                            .get_node_by_path_mut("Stratus/Update")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Hidden);
+                    }
                     RootEvent::ShowSettings => {
                         *scene.borrow_mut() = MenuScene::Settings;
                         let layout = layout.as_layout_mut();
-                        layout.get_node_by_path_mut("Stratus/Main Menu").unwrap().set_visibility(NodeVisibility::Hidden);
-                        layout.get_node_by_path_mut("Stratus/Mods").unwrap().set_visibility(NodeVisibility::Hidden);
-                        layout.get_node_by_path_mut("Stratus/Settings").unwrap().set_visibility(NodeVisibility::Inherited);
-                        layout.get_node_by_path_mut("Stratus/Update").unwrap().set_visibility(NodeVisibility::Hidden);
-                    },
+                        layout
+                            .get_node_by_path_mut("Stratus/Main Menu")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Hidden);
+                        layout
+                            .get_node_by_path_mut("Stratus/Mods")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Hidden);
+                        layout
+                            .get_node_by_path_mut("Stratus/Settings")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Inherited);
+                        layout
+                            .get_node_by_path_mut("Stratus/Update")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Hidden);
+                    }
                     RootEvent::ShowUpdate => {
                         *scene.borrow_mut() = MenuScene::Update;
                         let layout = layout.as_layout_mut();
-                        layout.get_node_by_path_mut("Stratus/Main Menu").unwrap().set_visibility(NodeVisibility::Hidden);
-                        layout.get_node_by_path_mut("Stratus/Mods").unwrap().set_visibility(NodeVisibility::Hidden);
-                        layout.get_node_by_path_mut("Stratus/Settings").unwrap().set_visibility(NodeVisibility::Hidden);
-                        layout.get_node_by_path_mut("Stratus/Update").unwrap().set_visibility(NodeVisibility::Inherited);
-                    },
-                    RootEvent::Quit => {
-                        unsafe { skyline::nn::oe::ExitApplication() }
+                        layout
+                            .get_node_by_path_mut("Stratus/Main Menu")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Hidden);
+                        layout
+                            .get_node_by_path_mut("Stratus/Mods")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Hidden);
+                        layout
+                            .get_node_by_path_mut("Stratus/Settings")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Hidden);
+                        layout
+                            .get_node_by_path_mut("Stratus/Update")
+                            .unwrap()
+                            .set_visibility(NodeVisibility::Inherited);
                     }
+                    RootEvent::Quit => unsafe { skyline::nn::oe::ExitApplication() },
                 }
             }
 
@@ -826,7 +1025,13 @@ extern "C" fn menu_thread(_: *mut skyline::libc::c_void) {
                 cmdbuf.clear_color(0, [1.0, 0.0, 0.0, 1.0].as_ptr(), 0xf);
                 backend.prepare_render(cmdbuf);
                 layout.render(&backend, cmdbuf);
-                cmdbuf.set_render_targets(1, &swapchain.get_texture(texture_index).unwrap(), std::ptr::null(), None, None);
+                cmdbuf.set_render_targets(
+                    1,
+                    &swapchain.get_texture(texture_index).unwrap(),
+                    std::ptr::null(),
+                    None,
+                    None,
+                );
                 cmdbuf.set_viewport(0, 0, 1920, 1080);
                 cmdbuf.set_scissor(0, 0, 1920, 1080);
                 cmdbuf.downsample(
@@ -874,7 +1079,7 @@ pub fn init_menu() {
         );
         let mem_base = skyline::hooks::getRegionAddress(skyline::hooks::Region::Text)
             .cast::<u8>()
-            .add(0x5940000);
+            .add(0x5941000);
         let memory_size = 0x1400000usize;
         nv_init_graphics(mem_base, memory_size);
 
@@ -898,7 +1103,7 @@ pub fn init_menu() {
             skyline::libc::memalign(0x1000, 0x40000).cast(),
             0x40000,
             0,
-            1,
+            2,
         );
         skyline::nn::os::StartThread(&mut *thread);
         PROMISED_HANDLE = Some(thread);

@@ -32,9 +32,12 @@ smash-hash = { git = "https://github.com/blu-dev/smash-hash" }
 stats_alloc = "0.1.10"
 # smash-hash = { path = "../smash-hash/smash-hash" }
 
+[patch.'https://github.com/blu-dev/smash-rs']
+smash = { path = "../smash-rs" }
+
 [patch.crates-io]
-bincode = { path = "../bincode" }
-bincode_derive = { path = "../bincode/derive" }
+# bincode = { path = "../bincode" }
+# bincode_derive = { path = "../bincode/derive" }
 getrandom = { git = "https://github.com/skyline-rs/getrandom" }
 
 # [path."https://github.com/blu-dev/envy"]

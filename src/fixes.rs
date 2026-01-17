@@ -23,7 +23,8 @@ pub fn install_lazy_loading_patches() {
     static mut PARAM_4: u64 = 0x0;
 
     // This function is what's responsible for loading the UI File.
-    #[from_offset(0x323b290)]
+    // 13.0.1 0x323b290
+    #[from_offset(0x323bf30)]
     pub fn load_ui_file(param_1: *const u64, ui_path_hash: *const u64, unk1: u64, unk2: u64);
 
     /*
@@ -31,7 +32,8 @@ pub fn install_lazy_loading_patches() {
       the type of UI to load and converts them to a hash40 that represents the path
       it needs to load
     */
-    #[from_offset(0x3237820)]
+    // 13.0.1 0x3237820
+    #[from_offset(0x32384c0)]
     pub fn get_ui_chara_path_from_hash_color_and_type(
         ui_chara_hash: u64,
         color_slot: u32,
@@ -39,21 +41,25 @@ pub fn install_lazy_loading_patches() {
     ) -> u64;
 
     // This takes the character_database and the ui_chara_hash to get the color_num
-    #[from_offset(0x32384c0)]
+    // 13.0.1 0x32384c0
+    #[from_offset(0x3239160)]
     pub fn get_color_num_from_hash(character_database: u64, ui_chara_hash: u64) -> u8;
 
     // This takes the character_database and the ui_chara_hash to get the chara's respective echo (for loading it at the same time)
-    #[from_offset(0x3261de0)]
+    // 13.0.1 0x3261de0
+    #[from_offset(0x3262a80)]
     pub fn get_ui_chara_echo(character_database: u64, ui_chara_hash: u64) -> u64;
 
-    #[hook(offset = 0x18465cc, inline)]
+    // 13.0.1 0x18465cc
+    #[hook(offset = 0x18470bc, inline)]
     pub unsafe fn original_load_chara_1_ui_for_all_colors(ctx: &mut InlineCtx) {
         // Save the first and fourth parameter for reference when we load the file ourselves
         PARAM_1 = ctx.registers[0].x();
         PARAM_4 = ctx.registers[3].x();
     }
 
-    #[hook(offset = 0x19e784c, inline)]
+    // 13.0.1 0x19e784c,
+    #[hook(offset = 0x19e834c, inline)]
     pub unsafe fn load_stock_icon_for_portrait_menu(ctx: &mut InlineCtx) {
         /*
           If both of these params are valid, then most likely we're in the
@@ -77,7 +83,7 @@ pub fn install_lazy_loading_patches() {
             // Get the character database for the color num function
             let parameters_cache = (skyline::hooks::getRegionAddress(skyline::hooks::Region::Text)
                 as *const u8)
-                .add(0x532d730);
+                .add(0x532e730);
             let max_color: u32 = get_color_num_from_hash(
                 (*(*(parameters_cache as *const u64) as *const ParametersCache)).get_chara_db()
                     as u64,
@@ -121,7 +127,8 @@ pub fn install_lazy_loading_patches() {
         }
     }
 
-    #[hook(offset = 0x19fc790)]
+    // 13.0.1 0x19fc790
+    #[hook(offset = 0x19fd290)]
     pub unsafe fn css_set_selected_character_ui(
         param_1: *const u64,
         chara_hash_1: u64,
@@ -132,7 +139,7 @@ pub fn install_lazy_loading_patches() {
     ) {
         let parameters_cache = (skyline::hooks::getRegionAddress(skyline::hooks::Region::Text)
             as *const u8)
-            .add(0x532d730);
+            .add(0x532e730);
         let echo = get_ui_chara_echo(
             (*(*(parameters_cache as *const u64) as *const ParametersCache)).get_chara_db() as u64,
             chara_hash_1,
@@ -142,7 +149,8 @@ pub fn install_lazy_loading_patches() {
         call_original!(param_1, chara_hash_1, chara_hash_2, color, unk1, unk2);
     }
 
-    #[hook(offset = 0x18467c0)]
+    // 13.0.1 18467c0
+    #[hook(offset = 0x18472b0)]
     pub unsafe fn chara_select_scene_destructor(param_1: u64) {
         // Clear the first and fourth param in our cache so we don't load outside of the chara select
         PARAM_1 = 0;
@@ -151,7 +159,7 @@ pub fn install_lazy_loading_patches() {
     }
 
     // Prevent the game from loading all chara_1 colors at once for all characters
-    Patch::in_text(0x18465cc)
+    Patch::in_text(0x18470bc)
         .nop()
         .expect("Failed to patch chara_1 load");
 
@@ -179,7 +187,7 @@ impl InklingEffect {
             vtable: 0,
             ptr_a: 0,
             ptr_b: 0,
-            unk: 0
+            unk: 0,
         }
     }
 }
@@ -215,17 +223,21 @@ pub fn install_inkling() {
         // skyline::patching::Patch::in_text(0x35bb964).nop().unwrap();
     }
 
-    #[skyline::hook(offset = 0x35bb960, inline)]
+    // 13.0.1 0x35bb960
+    #[skyline::hook(offset = 0x35bc9e0, inline)]
     fn set_inkling_color(ctx: &mut InlineCtx) {
         unsafe {
-            ctx.registers[24].set_x(super::INKLING_COLOR_MAP[ctx.registers[24].x() as usize] as u64);
+            ctx.registers[24]
+                .set_x(super::INKLING_COLOR_MAP[ctx.registers[24].x() as usize] as u64);
         }
     }
 
-    #[skyline::hook(offset = 0x35baed4, inline)]
+    // 13.0.1 0x35baed4
+    #[skyline::hook(offset = 0x35bbf54, inline)]
     fn set_inkling_color_2(ctx: &mut InlineCtx) {
         unsafe {
-            ctx.registers[20].set_x(super::INKLING_COLOR_MAP[ctx.registers[20].x() as usize] as u64);
+            ctx.registers[20]
+                .set_x(super::INKLING_COLOR_MAP[ctx.registers[20].x() as usize] as u64);
         }
     }
 

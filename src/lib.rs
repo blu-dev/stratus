@@ -289,7 +289,7 @@ impl LocalePreferences {
 
 static LOCALE: OnceLock<LocalePreferences> = OnceLock::new();
 
-#[skyline::from_offset(0x392cc60)]
+#[skyline::from_offset(0x392dce0)]
 fn jemalloc(size: u64, align: u64) -> *mut u8;
 
 static DID_LOAD: AtomicBool = AtomicBool::new(false);
@@ -348,8 +348,9 @@ fn handle_inflate_io_swaps(ctx: &mut InlineCtx) {
     }
 }
 
+// 13.0.1 35442e8
 #[allow(static_mut_refs)]
-#[skyline::hook(offset = 0x35442e8, inline)]
+#[skyline::hook(offset = 0x3544D18, inline)]
 fn jemalloc_hook(ctx: &mut InlineCtx) {
     static mut BUFFER: String = String::new();
     let res_service = ctx.registers[19].x() as *const u8;
@@ -482,7 +483,7 @@ fn jemalloc_hook(ctx: &mut InlineCtx) {
  *
  * We replace the offset conditional with our own check on what we set in this register. For more information, see `skip_load_hook_2`'s documentation
  */
-#[skyline::hook(offset = 0x3544338, inline)]
+#[skyline::hook(offset = 0x3544D68, inline)]
 fn skip_load_hook(ctx: &mut InlineCtx) {
     if DID_LOAD.swap(false, Ordering::Relaxed) {
         ctx.registers[3].set_x(2);
@@ -513,7 +514,7 @@ fn skip_load_hook(ctx: &mut InlineCtx) {
  *  Notably, even though skip_load_hook can set the register value to 0, the instruction which runs after skip_load_hook
  *  will branch to other code (that manages the vanilla "large load") if the file was not loaded by us and is a large load
  */
-#[skyline::hook(offset = 0x3544758, inline)]
+#[skyline::hook(offset = 0x3545188, inline)]
 fn skip_load_hook_p2(ctx: &mut InlineCtx) {
     let x = ctx.registers[3].x();
     ctx.registers[3].set_x(x - 1);
@@ -539,7 +540,7 @@ fn skip_load_hook_p2(ctx: &mut InlineCtx) {
 static mut LOADING_THREAD_PATCHED_POINTER: Option<*mut u8> = None;
 
 #[allow(static_mut_refs)]
-#[skyline::hook(offset = 0x3542f64, inline)]
+#[skyline::hook(offset = 0x3543994, inline)]
 fn process_single_patched_file_request(ctx: &mut InlineCtx) {
     static mut BUFFER: String = String::new();
 
@@ -557,7 +558,7 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
         unsafe {
             OFFSET_ABSOLUTE_ADDRESS = skyline::hooks::getRegionAddress(skyline::hooks::Region::Text)
                 .cast::<u8>()
-                .add(0x3542f68) as u64;
+                .add(0x3543998) as u64;
         }
     }
 
@@ -673,7 +674,7 @@ fn process_single_patched_file_request(ctx: &mut InlineCtx) {
  *  if we loaded it. This codepath will only fire for single file loads.
  */
 #[allow(static_mut_refs)]
-#[skyline::hook(offset = 0x3542fc4, inline)]
+#[skyline::hook(offset = 0x35439F4, inline)]
 fn loading_thread_assign_patched_pointer(ctx: &mut InlineCtx) {
     // SAFETY: We are only accessing this static mut inside of the ResLoadingThread, so it's not worth the overhead
     // of a mutex lock here
@@ -687,17 +688,17 @@ fn loading_thread_assign_patched_pointer(ctx: &mut InlineCtx) {
  *  before the game gets around to it, so we can save time on boot by just providing the game with the result of the work
  *  that we have already done.
  */
-#[skyline::hook(offset = 0x3750c2c, inline)]
+#[skyline::hook(offset = 0x3751cac, inline)]
 fn skip_load_resource_tables(ctx: &mut InlineCtx) {
     ctx.registers[0].set_x(ReadOnlyArchive::get().resource_data_ptr() as u64);
 }
 
-#[skyline::hook(offset = 0x3750c44, inline)]
+#[skyline::hook(offset = 0x3751CC4, inline)]
 fn skip_load_search_tables(ctx: &mut InlineCtx) {
     ctx.registers[0].set_x(ReadOnlyArchive::get().search_data_ptr() as u64);
 }
 
-#[skyline::hook(offset = 0x3544804, inline)]
+#[skyline::hook(offset = 0x3545234, inline)]
 fn observe_decompression(ctx: &mut InlineCtx) {
     let compressor = ctx.registers[0].x();
     let buffer_out = ctx.registers[1].x() as *mut ZstdBuffer;
@@ -717,27 +718,28 @@ fn patch_res_threads() {
     use skyline::patching::Patch;
 
     // jemalloc_hook
-    Patch::in_text(0x35442e8).nop().unwrap(); // Nops jemalloc_hook
+    Patch::in_text(0x3544D18).nop().unwrap(); // Nops jemalloc_hook
 
     // // skip_load_hook
-    Patch::in_text(0x3544338).data(0xB5002103u32).unwrap(); // cbnz x3, #0x420 (replacing b.ls #0x424)
+    Patch::in_text(0x3544D68).data(0xB5002103u32).unwrap(); // cbnz x3, #0x420 (replacing b.ls #0x424)
 
     // // skip_load_hook_2
-    Patch::in_text(0x3544758).data(0xB5001583u32).unwrap(); // cbnz x3, #0x2b0 (replacing ldr x2, [sp, #0x28])
+    Patch::in_text(0x3545188).data(0xB5001583u32).unwrap(); // cbnz x3, #0x2b0 (replacing ldr x2, [sp, #0x28])
 
     // // process_single_patched_file_request
-    Patch::in_text(0x3542f64).data(0xD61F0060u32).unwrap(); // br x3 (replacing mov x2, x21)
+    Patch::in_text(0x3543994).data(0xD61F0060u32).unwrap(); // br x3 (replacing mov x2, x21)
 
     // skip_load_resource_tables
-    Patch::in_text(0x3750c2c).nop().unwrap();
+    Patch::in_text(0x3751CAC).nop().unwrap();
 
     // skip_load_search_tables
-    Patch::in_text(0x3750c44).nop().unwrap();
+    Patch::in_text(0x3751CC4).nop().unwrap();
 
     // observe_decompression
-    Patch::in_text(0x3544804).nop().unwrap();
+    Patch::in_text(0x3545234).nop().unwrap();
 
-    Patch::in_text(0x17e0108).nop().unwrap();
+    // patches samusd bunshin model path
+    Patch::in_text(0x17e0bd8).nop().unwrap();
 }
 
 extern "C" {
@@ -748,7 +750,7 @@ extern "C" {
     fn set_cpu_boost_mode(val: i32);
 }
 
-#[skyline::hook(offset = 0x3544a1c, inline)]
+#[skyline::hook(offset = 0x354544C, inline)]
 fn panic_set_invalid_state(ctx: &InlineCtx) {
     if ctx.registers[8].w() == 0xFFFFFFFF {
         let res_service = ctx.registers[19].x() as *const u8;
@@ -761,7 +763,7 @@ fn panic_set_invalid_state(ctx: &InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x3543c34, inline)]
+#[skyline::hook(offset = 0x3544664, inline)]
 fn observe_res_service_inflate(ctx: &InlineCtx) {
     let res_service = ctx.registers[19].x() as *const u8;
     let current_index = ctx.registers[27].w();
@@ -801,8 +803,7 @@ pub extern "C" fn arcrop_require_api_version(_major: u32, _minor: u32) {}
 #[global_allocator]
 static ALLOC: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
-#[skyline::hook(offset = 0x3750b8c, inline)]
-fn initial_loading(_ctx: &InlineCtx) {
+fn initial_loading_impl() {
     ARCHIVE.get_or_init(|| {
         let now = std::time::Instant::now();
 
@@ -1653,7 +1654,12 @@ fn initial_loading(_ctx: &InlineCtx) {
     });
 }
 
-#[skyline::hook(offset = 0x3543188, inline)]
+#[skyline::hook(offset = 0x3751c0c, inline)]
+fn initial_loading(_ctx: &InlineCtx) {
+    initial_loading_impl();
+}
+
+#[skyline::hook(offset = 0x3543bb8, inline)]
 fn observe_load_package(ctx: &InlineCtx) {
     let package_idx = ctx.registers[2].w();
     let package = ReadOnlyArchive::get()
@@ -1668,7 +1674,7 @@ fn observe_load_package(ctx: &InlineCtx) {
 
 static SAMUSD_BUNSHIN_STRING: &CStr = c"fighter/samusd/model/bunshin/c%02d/model.numdlb";
 
-#[skyline::hook(offset = 0x17e0108, inline)]
+#[skyline::hook(offset = 0x17e0bd8, inline)]
 fn set_samusd_bunshin_string(ctx: &mut InlineCtx) {
     ctx.registers[1].set_x(SAMUSD_BUNSHIN_STRING.as_ptr() as u64);
 }
@@ -1682,33 +1688,43 @@ static mut INKLING_COLOR_MAP: [u32; 0x100] = [0; 0x100];
 
 static mut INKLING_COLOR_BUFFER: [glam::Vec4; 0x100] = [glam::Vec4::ZERO; 0x100];
 
-#[skyline::hook(offset = 0xb0b1b0, inline)]
+#[skyline::hook(offset = 0xb0b1d0, inline)]
 fn change_ptr_2(ctx: &mut InlineCtx) {
     unsafe {
         ctx.registers[1].set_x(INKLING_COLOR_BUFFER.as_mut_ptr() as u64);
     }
 }
 
-#[skyline::hook(offset = 0xb0b16c, inline)]
+#[skyline::hook(offset = 0xb0b18c, inline)]
 fn change_ptr_for_src_buffer(ctx: &mut InlineCtx) {
     unsafe {
         ctx.registers[11].set_x(8 + INKLING_COLOR_BUFFER.as_mut_ptr() as u64);
     }
 }
 
-#[skyline::hook(offset = 0x35bfafc, inline)]
+#[skyline::hook(offset = 0x35c0b7c, inline)]
 fn map_param_stage_ink_color_constant_buffer(ctx: &InlineCtx) {
     let buffer = unsafe { &**((ctx.registers[20].x() + 0x98) as *const *const nvn::Buffer) };
     let color_array = buffer.map().cast::<glam::Vec4>();
 
     for id in 0..8 {
-        if let Some(entry) = smash::app::FighterManager::instance().unwrap().get_fighter_entry(id) {
+        if let Some(entry) = smash::app::FighterManager::instance()
+            .unwrap()
+            .get_fighter_entry(id)
+        {
             let battle_object = unsafe {
-                *(entry as *const smash::app::FighterEntry).cast::<u8>().add(0x4160).cast::<*const smash::app::BattleObject>()
+                *(entry as *const smash::app::FighterEntry)
+                    .cast::<u8>()
+                    .add(0x4160)
+                    .cast::<*const smash::app::BattleObject>()
             };
 
             if unsafe { (*battle_object).kind } == smash::app::FighterKind::Inkling as i32 {
-                let color = unsafe { (*(*battle_object).module_accessor).work().get_int(smash::app::work_ids::fighter::instance::COLOR) };
+                let color = unsafe {
+                    (*(*battle_object).module_accessor)
+                        .work()
+                        .get_int(smash::app::work_ids::fighter::instance::COLOR)
+                };
                 unsafe {
                     *color_array.add(id as usize) = INKLING_COLOR_BUFFER[color as usize];
                     INKLING_COLOR_MAP[color as usize] = id as u32;
@@ -1716,7 +1732,6 @@ fn map_param_stage_ink_color_constant_buffer(ctx: &InlineCtx) {
             }
         }
     }
-
 }
 
 #[skyline::main(name = "stratus")]
@@ -1749,12 +1764,14 @@ pub fn main() {
 
     mount_save::get_locale_from_user_save();
 
-    skyline::install_hooks!(change_ptr_for_src_buffer, map_param_stage_ink_color_constant_buffer);
-
+    skyline::install_hooks!(
+        change_ptr_for_src_buffer,
+        map_param_stage_ink_color_constant_buffer
+    );
 
     unsafe {
         set_overclock_enabled(true);
-        set_cpu_boost_mode(1);
+        // set_cpu_boost_mode(1);
     }
 
     init_folder();
@@ -1767,9 +1784,9 @@ pub fn main() {
     let _ = log::set_logger(Box::leak(Box::new(NxKernelLogger::new())));
     unsafe { log::set_max_level_racy(LevelFilter::Info) };
 
-    unsafe {
-        set_cpu_boost_mode(0);
-    }
+    // unsafe {
+    //     set_cpu_boost_mode(0);
+    // }
 
     skyline::install_hooks!(
         skip_load_resource_tables,

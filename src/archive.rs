@@ -21,22 +21,23 @@ pub struct ZstdBuffer {
     pub pos: usize,
 }
 
-#[skyline::from_offset(0x39a2fc0)]
+#[skyline::from_offset(0x39a4040)]
 pub fn decompress_stream(unk: *mut u64, output: &mut ZstdBuffer, input: &mut ZstdBuffer) -> usize;
 
 #[repr(align(8), C)]
 struct FileNX([u8; 0x228]);
 
-#[skyline::from_offset(0x353a3c0)]
+#[skyline::from_offset(0x353adf0)]
 fn init_file(file_nx: &mut *mut FileNX);
 
-#[skyline::from_offset(0x353a500)]
+// 13.0.1 353a500
+#[skyline::from_offset(0x353af30)]
 fn open_file(file_nx: &mut *mut FileNX, path: *const i8) -> bool;
 
-#[skyline::from_offset(0x3540a90)]
+#[skyline::from_offset(0x35414C0)]
 fn read_compressed_at_offset(file_nx: &mut *mut FileNX, offset: usize) -> *mut u8;
 
-#[skyline::from_offset(0x37c58c0)]
+#[skyline::from_offset(0x37c6940)]
 fn read_into_ptr(file_nx: *mut FileNX, buffer: *mut u8, size: usize) -> usize;
 
 #[repr(C)]

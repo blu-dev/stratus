@@ -154,7 +154,7 @@ macro_rules! decl_api {
 
                 fn load() -> Self {
                     let get_proc_address: extern "C" fn(*const Device, *const i8) -> Option<NonNull<()>> = unsafe {
-                        std::mem::transmute(nvn_bootstrap_loader(c"nvnDeviceGetProcAddress".as_ptr()).unwrap())
+                        std::mem::transmute(nvn_bootstrap_loader(c"nvnDeviceGetProcAddress".as_ptr().cast()).unwrap())
                     };
 
                     Self {
@@ -166,11 +166,11 @@ macro_rules! decl_api {
 
                 fn load_with_device(device: &Device) -> Self {
                     let mut get_proc_address: extern "C" fn(*const Device, *const i8) -> Option<NonNull<()>> = unsafe {
-                        std::mem::transmute(nvn_bootstrap_loader(c"nvnDeviceGetProcAddress".as_ptr()).unwrap())
+                        std::mem::transmute(nvn_bootstrap_loader(c"nvnDeviceGetProcAddress".as_ptr().cast()).unwrap())
                     };
 
                     get_proc_address = unsafe {
-                        std::mem::transmute(get_proc_address(device, c"nvnDeviceGetProcAddress".as_ptr()).unwrap())
+                        std::mem::transmute(get_proc_address(device, c"nvnDeviceGetProcAddress".as_ptr().cast()).unwrap())
                     };
 
                     Self {

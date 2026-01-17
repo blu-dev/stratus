@@ -4,7 +4,6 @@ use std::{
     ops::{Index, IndexMut},
     ptr::NonNull,
     rc::Rc,
-    sync::Arc,
 };
 
 use bytemuck::{Pod, Zeroable};
@@ -638,7 +637,11 @@ impl ManagedImages {
         self.loaded_textures.get(name.as_ref()).map(|s| &*s.texture)
     }
 
-    pub fn new_multisampled_render_target(&mut self, name: impl AsRef<str>, target_size: glam::UVec2) -> TextureInfo {
+    pub fn new_multisampled_render_target(
+        &mut self,
+        name: impl AsRef<str>,
+        target_size: glam::UVec2,
+    ) -> TextureInfo {
         let name = name.as_ref();
 
         let mut builder = nvn::TextureBuilder::zeroed();
@@ -666,23 +669,26 @@ impl ManagedImages {
         let mut multisample_target = Box::new(nvn::Texture::zeroed());
         assert!(multisample_target.initialize(&builder));
 
-
         let mut builder = nvn::SamplerBuilder::zeroed();
         builder.set_defaults();
         builder.set_device(&self.device);
         let mut sampler = Box::new(nvn::Sampler::zeroed());
         assert!(sampler.initialize(&builder));
 
-        self.texture_pool.register_texture(self.texture_current, &multisample_target, None);
+        self.texture_pool
+            .register_texture(self.texture_current, &multisample_target, None);
         self.sampler_pool
             .register_sampler(self.sampler_current, &sampler);
 
-        self.loaded_textures.insert(name.to_string(), LoadedTexture {
-            memory,
-            texture: multisample_target,
-            size: target_size,
-            texture_id: self.texture_current
-        });
+        self.loaded_textures.insert(
+            name.to_string(),
+            LoadedTexture {
+                memory,
+                texture: multisample_target,
+                size: target_size,
+                texture_id: self.texture_current,
+            },
+        );
 
         let info = TextureInfo {
             size: target_size,
@@ -695,7 +701,6 @@ impl ManagedImages {
         self.sampler_current += 1;
 
         info
-
     }
 
     pub fn load_texture(&mut self, device: &nvn::Device, name: impl Into<String>, bytes: &[u8]) {

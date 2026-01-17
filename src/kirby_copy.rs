@@ -78,7 +78,8 @@ static mut CUSTOM_COPY_INFO: [CustomCopyInfo; 0x18] = unsafe {
  * - If this is disabled, there is a loop that will loop infinitely just below this hook, causing
  * an infinite load.
  */
-#[skyline::hook(offset = 0x17f0198, inline)]
+// 13.0.1 17f0198
+#[skyline::hook(offset = 0x17F0C68, inline)]
 fn on_initialize_copy_ability(ctx: &mut InlineCtx) {
     let kirby_costume_idx = ctx.registers[25].x();
     if kirby_costume_idx < 8 {
@@ -111,7 +112,8 @@ fn on_initialize_copy_ability(ctx: &mut InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x17f0224, inline)]
+// 13.0.1 17f0224
+#[skyline::hook(offset = 0x17F0CF4, inline)]
 fn on_check_for_redundancy(ctx: &mut InlineCtx) {
     let copy_ptr = ctx.registers[19].x();
     let fighter = ctx.registers[21].w();
@@ -127,7 +129,8 @@ fn on_check_for_redundancy(ctx: &mut InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x17efc10, inline)]
+// 13.0.1 17efc10
+#[skyline::hook(offset = 0x17F06E0, inline)]
 fn lookup_kirby_model_file(ctx: &mut InlineCtx) {
     let copy_ptr = ctx.registers[0].x();
     let fighter = ctx.registers[1].w();
@@ -146,7 +149,8 @@ fn lookup_kirby_model_file(ctx: &mut InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x17f03c8, inline)]
+// 13.0.1 17f03c8
+#[skyline::hook(offset = 0x17F0E98, inline)]
 fn on_increment_refcount(ctx: &mut InlineCtx) {
     let copy_ptr = ctx.registers[19].x();
     let fighter = ctx.registers[21].w();
@@ -160,7 +164,8 @@ fn on_increment_refcount(ctx: &mut InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x17efdc0, inline)]
+// 13.0.1 17efdc0
+#[skyline::hook(offset = 0x17f0890, inline)]
 fn lookup_kirby_motion_file(ctx: &mut InlineCtx) {
     let copy_ptr = ctx.registers[0].x();
     let fighter = ctx.registers[1].w();
@@ -179,7 +184,8 @@ fn lookup_kirby_motion_file(ctx: &mut InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x17f0610, inline)]
+// 13.0.1 0x17f0610
+#[skyline::hook(offset = 0x17F10E0, inline)]
 fn set_bodymotion_package_idx(ctx: &mut InlineCtx) {
     let copy_ptr = ctx.registers[19].x();
     let fighter = unsafe { *(ctx.registers[9].x() as *const u32) };
@@ -196,7 +202,8 @@ fn set_bodymotion_package_idx(ctx: &mut InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x17f080c, inline)]
+// 13.0.1 0x17f080c
+#[skyline::hook(offset = 0x17f12dc, inline)]
 fn set_sound_package_idx(ctx: &mut InlineCtx) {
     let copy_ptr = ctx.registers[19].x();
     let fighter = unsafe { *(ctx.registers[27].x() as *const u32) };
@@ -213,7 +220,9 @@ fn set_sound_package_idx(ctx: &mut InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x17f1fd8, inline)]
+// 13.0.1 0x17f1fd8
+// 13.0.4 0x17f2aa8
+#[skyline::hook(offset = 0x17f2aa8, inline)]
 fn fetch_file_1(ctx: &mut InlineCtx) {
     let copy_ptr = ctx.registers[25].x();
     let fighter = ctx.registers[26].w();
@@ -229,25 +238,9 @@ fn fetch_file_1(ctx: &mut InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x341a740, inline)]
-fn on_copy_1(ctx: &mut InlineCtx) {
-    let copy_ptr = ctx.registers[25].x();
-    let fighter = ctx.registers[26].w();
-    let slot = ctx.registers[23].w();
-
-    unsafe {
-        if let Some(info) = CUSTOM_COPY_INFO.iter_mut().find(|info| {
-            info.copy_module_ptr == copy_ptr && info.fighter == fighter && info.slot == slot
-        }) {
-            ctx.registers[0].set_x(
-                info.costume_info.base_addr()
-                    - (std::mem::size_of::<CopyAbilityCostumeInfo>() as u64 * slot as u64 + 8),
-            );
-        }
-    }
-}
-
-#[skyline::hook(offset = 0x341a740, inline)]
+// 13.0.1 0x341a740
+// 13.0.4 0x341B170
+#[skyline::hook(offset = 0x341B170, inline)]
 fn on_copy_2(ctx: &mut InlineCtx) {
     let copy_ptr = ctx.registers[25].x();
     let fighter = ctx.registers[26].w();
@@ -265,7 +258,9 @@ fn on_copy_2(ctx: &mut InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x341d1b4, inline)]
+// 13.0.1 0x341d1b4
+// 13.0.4 0x341dbe4
+#[skyline::hook(offset = 0x341dbe4, inline)]
 fn on_copy_3(ctx: &mut InlineCtx) {
     let copy_ptr = ctx.registers[25].x();
     let fighter = ctx.registers[26].w();
@@ -283,7 +278,10 @@ fn on_copy_3(ctx: &mut InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x341d300, inline)]
+// rel: 0xa30
+// 13.0.1 0x341d300
+// 13.0.4 0x341dd30
+#[skyline::hook(offset = 0x341dd30, inline)]
 fn on_copy_4(ctx: &mut InlineCtx) {
     let copy_ptr = ctx.registers[26].x();
     let fighter = ctx.registers[27].w();
@@ -302,7 +300,9 @@ fn on_copy_4(ctx: &mut InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x6de93c, inline)]
+// 13.0.1 0x6de93c
+// 13.0.4 0x6de95c
+#[skyline::hook(offset = 0x6de95c, inline)]
 fn fighter_class(ctx: &mut InlineCtx) {
     let copy_ptr = ctx.registers[22].x();
     let fighter = ctx.registers[25].w();
@@ -321,6 +321,9 @@ fn fighter_class(ctx: &mut InlineCtx) {
     }
 }
 
+// rel 0x20
+// 13.0.1 0xba44fc
+// 13.0.4 0xba451c
 #[skyline::hook(offset = 0xba44fc, inline)]
 fn kirby_fighter_class(ctx: &mut InlineCtx) {
     let copy_ptr = ctx.registers[24].x();
@@ -339,7 +342,9 @@ fn kirby_fighter_class(ctx: &mut InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x17f0944, inline)]
+// 13.0.1 0x17f0944
+// 13.0.4 0x17F1414
+#[skyline::hook(offset = 0x17F1414, inline)]
 fn on_finalize_copy_ability(ctx: &mut InlineCtx) {
     let copy_ptr = ctx.registers[19].x();
     let fighter = ctx.registers[21].w();
@@ -355,7 +360,10 @@ fn on_finalize_copy_ability(ctx: &mut InlineCtx) {
     }
 }
 
-#[skyline::hook(offset = 0x17f0fb0, inline)]
+// rel: ad0
+// 13.0.1 0x17f0fb0
+// 13.0.4 0x17f1a80
+#[skyline::hook(offset = 0x17f1a80, inline)]
 fn on_finalize_copy_ability_fix(ctx: &mut InlineCtx) {
     let target_addr = ctx.registers[20].x();
     unsafe {
@@ -386,7 +394,6 @@ pub fn install() {
         set_bodymotion_package_idx,
         set_sound_package_idx,
         fetch_file_1,
-        on_copy_1,
         on_copy_2,
         on_copy_3,
         on_copy_4,

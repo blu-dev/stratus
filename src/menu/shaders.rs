@@ -67,10 +67,10 @@ pub enum StaticShaderData {
 impl StaticShaderData {
     pub fn offset(&self) -> usize {
         match self {
-            Self::SystemDebugDrawConstantVS => 0x4741338,
-            Self::SystemDebugDrawConstantPS => 0x47443a8,
-            Self::SystemDebugDrawTexture2DVS => 0x474dd90,
-            Self::SystemDebugDrawTexture2DPS => 0x4750cd0,
+            Self::SystemDebugDrawConstantVS => 0x47421e8, // 13.0.1 4741338
+            Self::SystemDebugDrawConstantPS => 0x4745258, // 13.0.1 47443a8
+            Self::SystemDebugDrawTexture2DVS => 0x474ec40, // 13.0.1 474dd90,
+            Self::SystemDebugDrawTexture2DPS => 0x4751b80, // 13.0.1 4750cd0
         }
     }
 }

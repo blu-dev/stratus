@@ -35,6 +35,8 @@ checksum = "230c5f1ca6a325a32553f8640d31ac9b49f2411e901e427570154868b46da4f7"
 [[package]]
 name = "bincode"
 version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
 dependencies = [
  "bincode_derive",
  "serde",
@@ -44,6 +46,8 @@ dependencies = [
 [[package]]
 name = "bincode_derive"
 version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf95709a440f45e986983918d0e8a1f30a9b1df04918fc828670606804ac3c09"
 dependencies = [
  "virtue",
 ]
@@ -726,7 +730,6 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "smash"
 version = "0.1.0"
-source = "git+https://github.com/blu-dev/smash-rs#bdf75541fe603785290c95a588f5b0ce12dc4896"
 dependencies = [
  "bitflags 1.3.2",
  "hash40",
@@ -746,7 +749,6 @@ source = "git+https://github.com/blu-dev/smash-hash#31f4e770d4b8ac494cab14f6330a
 [[package]]
 name = "smash_macro"
 version = "0.1.0"
-source = "git+https://github.com/blu-dev/smash-rs#bdf75541fe603785290c95a588f5b0ce12dc4896"
 dependencies = [
  "proc-macro2",
  "quote",
